@@ -125,7 +125,7 @@ func (a *App) usage() {
   xlan text <内容|-> [--to 设备]     发文本，省略 --to 就是公共
   xlan send <文件|目录|->... (--to 设备)  发文件，可多个，--all 群发，--limit 限速
   xlan inbox [-n 20] [--since 2h]   收件箱
-  xlan inbox --watch                实时跟随
+  xlan inbox --watch [-i]           实时跟随，-i 可边看边接收
   xlan inbox accept|reject [序号]  处理待确认的传输
   xlan inbox cancel [序号]         取消卡住的传输
   xlan inbox cancel --all          取消全部未完成的传输
@@ -756,6 +756,8 @@ func (a *App) cmdInbox(args []string) int {
 	n := fs.Int("n", 20, "条数")
 	since := fs.Duration("since", 0, "只看这段时间之后")
 	watch := fs.Bool("watch", false, "实时跟随")
+	interactiveFlag := fs.Bool("i", false, "监看模式：可以输入编号直接接收")
+	fs.BoolVar(interactiveFlag, "interactive", false, "监看模式：可以输入编号直接接收")
 	noWait := fs.Bool("no-wait", false, "接收后不等传完")
 	all := fs.Bool("all", false, "全部取消")
 	olderThan := fs.String("older-than", "30d", "清理多久之前的记录")
@@ -796,7 +798,7 @@ func (a *App) cmdInbox(args []string) int {
 	ctx := context.Background()
 
 	if *watch {
-		return a.watchInbox(ctx, base)
+		return a.watchInbox(ctx, base, *interactiveFlag)
 	}
 
 	var sinceTs int64
@@ -821,7 +823,7 @@ func (a *App) cmdInbox(args []string) int {
 	return core.ExitOK
 }
 
-func (a *App) watchInbox(ctx context.Context, base string) int {
+func (a *App) watchInbox(ctx context.Context, base string, interactive bool) int {
 	ch, err := client.Watch(ctx, base)
 	if err != nil {
 		return a.fail("WATCH", core.ExitError, err.Error())
@@ -833,8 +835,62 @@ func (a *App) watchInbox(ctx context.Context, base string) int {
 	lastPct := map[string]int{}
 	lastAt := map[string]time.Time{}
 
+	// 终端里可以边看边按编号接收
+	cmds := make(chan string, 8)
+	interactive = interactive && !a.JSON && isTTY() && isTerminalWriter(a.Out)
+	if interactive {
+		fmt.Fprintln(a.Out, "按编号接收，a 接收全部，q 退出。")
+		go readCommands(cmds)
+	}
+	pendingIdx := map[int]string{}
+	nextIdx := 1
+
 	for {
 		select {
+		case line, ok := <-cmds:
+			if !ok {
+				return core.ExitOK
+			}
+			cmd := strings.TrimSpace(strings.ToLower(line))
+			switch {
+			case cmd == "q" || cmd == "quit" || cmd == "exit":
+				return core.ExitOK
+			case cmd == "":
+			case cmd == "a" || cmd == "all":
+				if len(pendingIdx) == 0 {
+					fmt.Fprintln(a.Out, "  现在没有待确认的传输。")
+					continue
+				}
+				ids := make([]string, 0, len(pendingIdx))
+				for _, id := range pendingIdx {
+					ids = append(ids, id)
+				}
+				for _, id := range ids {
+					if err := client.Decision(ctx, base, id, "accept"); err != nil {
+						fmt.Fprintf(a.Out, "  接收失败：%v\n", err)
+						continue
+					}
+				}
+				pendingIdx = map[int]string{}
+				fmt.Fprintln(a.Out, "  已接收全部待确认的传输。")
+			default:
+				n, err := strconv.Atoi(cmd)
+				if err != nil {
+					fmt.Fprintln(a.Out, "  看不懂，输入编号 / a / q。")
+					continue
+				}
+				id, ok := pendingIdx[n]
+				if !ok {
+					fmt.Fprintln(a.Out, "  没有这个编号。")
+					continue
+				}
+				if err := client.Decision(ctx, base, id, "accept"); err != nil {
+					fmt.Fprintf(a.Out, "  接收失败：%v\n", err)
+					continue
+				}
+				delete(pendingIdx, n)
+				fmt.Fprintf(a.Out, "  已接收 #%d。\n", n)
+			}
 		case ev, ok := <-ch:
 			if !ok {
 				return core.ExitOK
@@ -863,11 +919,22 @@ func (a *App) watchInbox(ctx context.Context, base string) int {
 				}
 			case core.EvItemNew:
 				if it, ok := decodeItem(ev.Data); ok {
-					fmt.Fprintln(a.Out, formatItem(it))
+					if interactive && it.Status == core.StatusPending {
+						pendingIdx[nextIdx] = it.ID
+						fmt.Fprintf(a.Out, "[#%d] %s\n", nextIdx, formatItem(it))
+						nextIdx++
+					} else {
+						fmt.Fprintln(a.Out, formatItem(it))
+					}
 					continue
 				}
 			case core.EvItemUpdate:
 				if u, ok := decodeItemUpdate(ev.Data); ok {
+					for k, id := range pendingIdx {
+						if id == u.ID && (u.Status == "active" || u.Status == "done" || u.Status == "failed") {
+							delete(pendingIdx, k)
+						}
+					}
 					label := map[string]string{
 						"done": "完成", "failed": "失败", "active": "已接受",
 					}[u.Status]
@@ -2443,4 +2510,18 @@ func (a *App) cmdPin(args []string) int {
 		return core.ExitOK
 	}
 	return a.fail("USAGE", core.ExitUsage, "用法：xlan pin list|forget [主机]")
+}
+
+// readCommands 从终端读命令，按行。
+func readCommands(ch chan<- string) {
+	defer close(ch)
+	sc := bufio.NewScanner(os.Stdin)
+	for sc.Scan() {
+		ch <- sc.Text()
+	}
+}
+
+func isTerminalWriter(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	return ok && isTerminal(f)
 }

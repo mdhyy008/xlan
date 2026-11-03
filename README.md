@@ -66,7 +66,7 @@ xlan recv <id> -o -   # 把内容管道出去
 | `xlan text <内容\|->` | 发文本，省略 `--to` 就是公共 |
 | `xlan send <文件\|目录\|->` | 发文件或目录，`--to` 指定设备，`--all` 群发 |
 | `xlan inbox` | 收件箱，默认最新 20 条 |
-| `xlan inbox --watch` | 实时跟随 |
+| `xlan inbox --watch [-i]` | 实时跟随，`-i` 可边看边接收 |
 | `xlan inbox accept\|reject [序号\|--all]` | 处理待确认的传输，`--all` 批量处理 |
 | `xlan inbox cancel [序号\|--all]` | 取消卡住的传输，`--all` 全部取消 |
 | `xlan inbox clean --older-than 30d` | 清理旧记录，加 `--with-files` 连文件一起删 |

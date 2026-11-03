@@ -173,6 +173,9 @@
 批量形式：`accept --all` 接收所有 `pending`，`cancel --all` 清掉所有未完成的。
 `--json` 返回 `{"done":N,"failed":M}`。
 
+`inbox --watch -i` 是监看模式：输入编号接收单条，`a` 接收全部，`q` 退出。
+不加 `-i` 的 `--watch` 只输出、不读键盘；非终端或 `--json` 下 `-i` 自动失效。
+
 服务端每 30 秒扫一次：`active` 且 **5 分钟没有新数据**的传输会自动置为 `failed`（事件里带 `reason:"stale"`），所以不会永久挂着。
 
 只能处理 `pending` 状态的条目，其余状态返回 2。
