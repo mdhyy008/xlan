@@ -139,7 +139,8 @@
 | `1793…` | 条目 id 或其前缀 |
 
 `cancel` 可以作用在 `pending` 和 `active` 上，用来清理卡死的传输，状态置为 `failed`。
-`xlan inbox cancel --all` 一次清掉所有未完成的，`--json` 返回 `{"canceled":N,"failed":M}`。
+批量形式：`accept --all` 接收所有 `pending`，`cancel --all` 清掉所有未完成的。
+`--json` 返回 `{"done":N,"failed":M}`。
 
 服务端每 30 秒扫一次：`active` 且 **5 分钟没有新数据**的传输会自动置为 `failed`（事件里带 `reason:"stale"`），所以不会永久挂着。
 

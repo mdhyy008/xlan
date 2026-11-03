@@ -62,7 +62,7 @@ xlan recv <id> -o -   # 把内容管道出去
 | `xlan send <文件\|目录\|->` | 发文件或目录，`--to` 指定设备，`--all` 群发 |
 | `xlan inbox` | 收件箱，默认最新 20 条 |
 | `xlan inbox --watch` | 实时跟随 |
-| `xlan inbox accept\|reject [序号]` | 处理待确认的传输，只有一条时可不写 |
+| `xlan inbox accept\|reject [序号\|--all]` | 处理待确认的传输，`--all` 批量处理 |
 | `xlan inbox cancel [序号\|--all]` | 取消卡住的传输，`--all` 全部取消 |
 | `xlan recv <id> [--out 路径] [-o -]` | 取出内容，`-` 表示 stdout |
 | `xlan trust add\|rm\|list` | 信任白名单 |

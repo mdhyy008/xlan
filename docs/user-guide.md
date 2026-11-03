@@ -233,6 +233,12 @@ xlan inbox accept
 xlan inbox accept 2
 ```
 
+想一次全收下：
+
+```
+xlan inbox accept --all
+```
+
 不想要，把 `accept` 换成 `reject` 就行。
 
 传了一半对方断了、一直显示 `active` 不动了，用这个清掉：
@@ -324,6 +330,7 @@ xlan text "内容"                    发文字给所有人
 xlan text "内容" --to 名字          发文字给某个人
 xlan inbox                         看收到的东西
 xlan inbox accept [序号]           接收（只有一条时不用写序号）
+xlan inbox accept --all            全部接收
 xlan inbox reject [序号]           拒收
 xlan inbox cancel [序号]           取消卡住的传输
 xlan inbox cancel --all            取消全部未完成的
