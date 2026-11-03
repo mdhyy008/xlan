@@ -25,11 +25,11 @@
 ## 3. 命名与路径
 
 - 命令：`xlan`
-- Linux/macOS：配置 `~/.config/xlan`，数据 `~/.local/share/xlan`，缓存 `~/.cache/xlan`
-- Windows：`%APPDATA%\xlan`、`%LOCALAPPDATA%\xlan`
-- 数据库：`<数据目录>/xlan.db`
-- 收件目录：默认下载目录下的 `xlan`（安卓 `/sdcard/Download/xlan`，其余 `~/Downloads/xlan`），用 `xlan config set recv_dir` 改
-- 所有运行时文件都在上述目录，不写系统临时目录
+- 配置与数据统一放在**可执行文件所在目录**，不写系统目录；拷走整个程序目录即完成迁移
+- 收件目录是唯一可配置项，默认取系统下载目录（安卓 `/sdcard/Download`）
+- 数据库：`<程序目录>/xlan.db`
+- 收件目录：默认下载目录下的 `xlan`，用 `xlan config set recv_dir` 改
+- 所有运行时文件都在程序目录，不写系统临时目录
 
 ## 4. 端口
 

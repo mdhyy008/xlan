@@ -248,6 +248,7 @@ func (s *Server) handlePutData(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "SHORT", "body shorter than declared range")
 		return
 	}
+	s.noteReceived(id, start+int64(n), total, end+1 >= total)
 
 	if total > 0 && end+1 < total {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "offset": start + int64(n)})
@@ -271,10 +272,12 @@ func (s *Server) finalize(it core.Item, part string) error {
 	if it.SHA256 != "" {
 		got, err := fileSHA256(part)
 		if err != nil {
+			s.clearProgress(it.ID)
 			return err
 		}
 		if !strings.EqualFold(got, it.SHA256) {
 			os.Remove(part)
+			s.clearProgress(it.ID)
 			return fmt.Errorf("%w: want %s, got %s", ErrChecksum, it.SHA256, got)
 		}
 	}
@@ -292,6 +295,7 @@ func (s *Server) finalize(it core.Item, part string) error {
 	s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(),
 		Data: map[string]any{"id": it.ID, "status": string(core.StatusDone), "path": final}})
 	s.clear(it.ID)
+	s.clearProgress(it.ID)
 	s.maybeRestart()
 	return nil
 }

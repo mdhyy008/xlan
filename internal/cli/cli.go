@@ -45,6 +45,7 @@ type App struct {
 
 // Run 是 CLI 的入口，返回进程退出码。
 func Run(args []string) int {
+	_ = config.EnsureMigrated()
 	a := &App{Out: os.Stdout, Err: os.Stderr, Timeout: 60 * time.Second}
 	if len(args) == 0 {
 		a.usage()
@@ -488,6 +489,9 @@ func (a *App) sendOne(ctx context.Context, peer core.Peer, src string, size int6
 	}
 	defer f.Close()
 
+	bar := newProgress(a.Err, "发送 "+filepath.Base(src), size, a.showProgress())
+	defer bar.finish()
+
 	var off int64
 	for off < size {
 		n := int64(chunkSize)
@@ -501,12 +505,7 @@ func (a *App) sendOne(ctx context.Context, peer core.Peer, src string, size int6
 			return err
 		}
 		off += n
-		if !a.Quiet {
-			fmt.Fprintf(a.Err, "\r%s  %d%%", peer.Name, off*100/size)
-		}
-	}
-	if !a.Quiet {
-		fmt.Fprintln(a.Err)
+		bar.update(off)
 	}
 	return nil
 }
@@ -535,6 +534,7 @@ func (a *App) cmdInbox(args []string) int {
 	n := fs.Int("n", 20, "条数")
 	since := fs.Duration("since", 0, "只看这段时间之后")
 	watch := fs.Bool("watch", false, "实时跟随")
+	noWait := fs.Bool("no-wait", false, "接收后不等传完")
 	rest, err := parseInterspersed(fs, args)
 	if err != nil {
 		return core.ExitUsage
@@ -551,7 +551,7 @@ func (a *App) cmdInbox(args []string) int {
 		subID = rest[1]
 	}
 	if sub == "accept" || sub == "reject" {
-		return a.decide(sub, subID)
+		return a.decide(sub, subID, *noWait)
 	}
 
 	base, code := a.ensure()
@@ -623,7 +623,7 @@ func (a *App) watchInbox(ctx context.Context, base string) int {
 	}
 }
 
-func (a *App) decide(action, arg string) int {
+func (a *App) decide(action, arg string, noWait bool) int {
 	base, code := a.ensure()
 	if code != 0 {
 		return code
@@ -646,6 +646,10 @@ func (a *App) decide(action, arg string) int {
 		a.emit(map[string]any{"ok": true, "id": target.ID, "action": action})
 	} else {
 		fmt.Fprintf(a.Out, "已%s %s\n", map[string]string{"accept": "接收", "reject": "拒收"}[action], describeTarget(target))
+	}
+
+	if action == "accept" && !noWait && a.showProgress() && target.Kind != core.KindText {
+		a.followTransfer(base, target)
 	}
 	return core.ExitOK
 }
@@ -1042,28 +1046,28 @@ func (a *App) sendFolder(ctx context.Context, peer core.Peer, root string) error
 		}
 	}
 
-	total := m.FileCount()
-	done := 0
+	bar := newProgress(a.Err, "发送 "+m.Root, m.TotalSize(), a.showProgress())
+	defer bar.finish()
+
+	var sent int64
 	for _, e := range m.Entries {
 		if e.Dir {
 			continue
 		}
 		src := filepath.Join(root, filepath.FromSlash(e.Rel))
-		if err := a.uploadFile(ctx, base, resp.ID, e.Rel, src, e.Size); err != nil {
+		base0 := sent
+		if err := a.uploadFile(ctx, base, resp.ID, e.Rel, src, e.Size, func(n int64) {
+			bar.update(base0 + n)
+		}); err != nil {
 			return err
 		}
-		done++
-		if !a.Quiet {
-			fmt.Fprintf(a.Err, "\r%s  %d/%d  %s", peer.Name, done, total, e.Rel)
-		}
-	}
-	if !a.Quiet && total > 0 {
-		fmt.Fprintln(a.Err)
+		sent += e.Size
+		bar.update(sent)
 	}
 	return client.FinishFolder(ctx, base, resp.ID)
 }
 
-func (a *App) uploadFile(ctx context.Context, base, id, rel, src string, size int64) error {
+func (a *App) uploadFile(ctx context.Context, base, id, rel, src string, size int64, onChunk func(sent int64)) error {
 	f, err := os.Open(src)
 	if err != nil {
 		return err
@@ -1083,6 +1087,9 @@ func (a *App) uploadFile(ctx context.Context, base, id, rel, src string, size in
 			return err
 		}
 		off += n
+		if onChunk != nil {
+			onChunk(off)
+		}
 	}
 	return nil
 }

@@ -41,6 +41,79 @@ type Server struct {
 	activityMu sync.Mutex
 	// activity 记录每个进行中的传输最后一次动的时间，用于判断能否重启。
 	activity map[string]int64
+
+	progMu sync.Mutex
+	// progs 记录每个传输的进度状态，用于给客户端推实时速度。
+	progs map[string]*progressState
+}
+
+// progressState 是一个传输的字节进度。
+type progressState struct {
+	total     int64
+	committed int64 // 目录传输里已完成文件的总字节
+	received  int64 // 当前绝对进度（含正在传的文件）
+	lastEmit  time.Time
+}
+
+func (s *Server) progLocked(id string) *progressState {
+	if s.progs == nil {
+		s.progs = make(map[string]*progressState)
+	}
+	st := s.progs[id]
+	if st == nil {
+		st = &progressState{}
+		s.progs[id] = st
+	}
+	return st
+}
+
+// noteReceived 记录某个传输的绝对进度，节流后推一条事件。
+func (s *Server) noteReceived(id string, received, total int64, force bool) {
+	s.progMu.Lock()
+	st := s.progLocked(id)
+	if total > 0 {
+		st.total = total
+	}
+	if received > st.received {
+		st.received = received
+	}
+	now := time.Now()
+	if !force && now.Sub(st.lastEmit) < 250*time.Millisecond {
+		s.progMu.Unlock()
+		return
+	}
+	st.lastEmit = now
+	got, tot := st.received, st.total
+	s.progMu.Unlock()
+
+	s.Bus.Publish(core.Event{Type: core.EvTransfer, Ts: now.Unix(), Data: map[string]any{
+		"id": id, "received": got, "total": tot,
+	}})
+}
+
+// committedOf 返回目录传输里已完成文件的累计字节。
+func (s *Server) committedOf(id string) int64 {
+	s.progMu.Lock()
+	defer s.progMu.Unlock()
+	return s.progLocked(id).committed
+}
+
+// bumpCommitted 在一个文件传完后累加已完成字节。
+func (s *Server) bumpCommitted(id string, n int64) {
+	s.progMu.Lock()
+	defer s.progMu.Unlock()
+	st := s.progLocked(id)
+	st.committed += n
+	if st.committed > st.received {
+		st.received = st.committed
+	}
+}
+
+// clearProgress 在传输结束时清掉状态。
+func (s *Server) clearProgress(id string) {
+	s.progMu.Lock()
+	delete(s.progs, id)
+	s.progMu.Unlock()
 }
 
 // busyWindow 是判断"还在传"的时间窗口：分块之间有间隔，不能看瞬时状态。

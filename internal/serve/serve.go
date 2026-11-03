@@ -22,6 +22,9 @@ import (
 
 // Run 是常驻服务的主体。所有 socket 都由它持有。
 func Run(ctx context.Context, cfgDir string) error {
+	if err := config.EnsureMigrated(); err != nil {
+		return err
+	}
 	cfg, err := config.Load(cfgDir)
 	if err != nil {
 		return err

@@ -30,40 +30,102 @@ func home() string {
 	return h
 }
 
-// Dir 返回配置目录。
-func Dir() (string, error) {
+// Dir 和 DataDir 都指向程序自己所在的目录，配置和数据跟着程序走。
+// 只有收件目录是可配置的，其余一律写在程序目录里。
+func Dir() (string, error) { return ExeDir() }
+
+func DataDir() (string, error) { return ExeDir() }
+
+// ExeDir 返回可执行文件所在的绝对目录。
+func ExeDir() (string, error) {
+	p, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		p = resolved
+	}
+	return filepath.Dir(p), nil
+}
+
+// legacyConfigDir / legacyDataDir 是 0.1 早期版本用过的系统目录，
+// 只用于一次性搬迁旧数据。
+func legacyConfigDir() string {
 	switch runtime.GOOS {
 	case "windows":
 		if v := os.Getenv("APPDATA"); v != "" {
-			return filepath.Join(v, "xlan"), nil
+			return filepath.Join(v, "xlan")
 		}
 	case "darwin":
-		return filepath.Join(home(), "Library", "Application Support", "xlan"), nil
+		return filepath.Join(home(), "Library", "Application Support", "xlan")
 	default:
 		if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
-			return filepath.Join(v, "xlan"), nil
+			return filepath.Join(v, "xlan")
 		}
-		return filepath.Join(home(), ".config", "xlan"), nil
+		return filepath.Join(home(), ".config", "xlan")
 	}
-	return filepath.Join(home(), ".config", "xlan"), nil
+	return filepath.Join(home(), ".config", "xlan")
 }
 
-// DataDir 返回数据目录（数据库、设备 id）。
-func DataDir() (string, error) {
+func legacyDataDir() string {
 	switch runtime.GOOS {
 	case "windows":
 		if v := os.Getenv("LOCALAPPDATA"); v != "" {
-			return filepath.Join(v, "xlan"), nil
+			return filepath.Join(v, "xlan")
 		}
 	case "darwin":
-		return filepath.Join(home(), "Library", "Application Support", "xlan"), nil
+		return filepath.Join(home(), "Library", "Application Support", "xlan")
 	default:
 		if v := os.Getenv("XDG_DATA_HOME"); v != "" {
-			return filepath.Join(v, "xlan"), nil
+			return filepath.Join(v, "xlan")
 		}
-		return filepath.Join(home(), ".local", "share", "xlan"), nil
+		return filepath.Join(home(), ".local", "share", "xlan")
 	}
-	return filepath.Join(home(), ".local", "share", "xlan"), nil
+	return filepath.Join(home(), ".local", "share", "xlan")
+}
+
+// EnsureMigrated 把旧版本放在系统目录里的配置和数据搬进程序目录。
+// 只搬一次，新目录已经有数据库就跳过。
+func EnsureMigrated() error {
+	dst, err := ExeDir()
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(dst, "xlan.db")); err == nil {
+		return nil
+	}
+	for _, src := range []string{legacyConfigDir(), legacyDataDir()} {
+		if src == dst || src == "" {
+			continue
+		}
+		entries, err := os.ReadDir(src)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			moveFile(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name()))
+		}
+		_ = os.Remove(src)
+	}
+	return nil
+}
+
+func moveFile(src, dst string) {
+	if _, err := os.Stat(dst); err == nil {
+		return // 目标已存在，不覆盖
+	}
+	if err := os.Rename(src, dst); err == nil {
+		return
+	}
+	// 跨分区时退化成复制
+	if b, err := os.ReadFile(src); err == nil {
+		if os.WriteFile(dst, b, 0o644) == nil {
+			_ = os.Remove(src)
+		}
+	}
 }
 
 // Load 读取配置，文件不存在时返回默认配置。

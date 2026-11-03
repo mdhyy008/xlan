@@ -164,6 +164,7 @@ func (s *Server) handlePutFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "SHORT", "body shorter than declared range")
 		return
 	}
+	s.noteReceived(id, s.committedOf(id)+start+int64(n), it.Size, end+1 >= total)
 	if end+1 < total {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "offset": start + int64(n)})
 		return
@@ -186,6 +187,7 @@ func (s *Server) handlePutFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "FS", err.Error())
 		return
 	}
+	s.bumpCommitted(id, entry.Size)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "done": true, "rel": rel})
 }
 
@@ -255,6 +257,7 @@ func (s *Server) handleFinish(w http.ResponseWriter, r *http.Request) {
 	s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(),
 		Data: map[string]any{"id": id, "status": string(core.StatusDone), "path": it.Path}})
 	s.clear(id)
+	s.clearProgress(id)
 	s.maybeRestart()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "done": true, "path": it.Path})
 }
