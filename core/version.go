@@ -22,3 +22,20 @@ func VersionString() string {
 		return Version
 	}
 }
+
+// FormatBytes 把字节数变成 "12.3 MB" 这样的可读形式。
+func FormatBytes(n int64) string {
+	if n < 0 {
+		n = 0
+	}
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for m := n / unit; m >= unit; m /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
+}

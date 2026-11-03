@@ -3,6 +3,7 @@ package serve
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -186,6 +187,9 @@ func Run(ctx context.Context, cfgDir string, autoAccept bool) error {
 	errCh := make(chan error, 1)
 	go func() { errCh <- hs.Serve(ln) }()
 
+	// 前台跑的时候，收到东西直接在终端说一声。
+	go watchIncoming(bus, runCtx)
+
 	// 定期清理对方断线后挂着的传输。
 	go func() {
 		t := time.NewTicker(30 * time.Second)
@@ -259,4 +263,55 @@ func bindUDP(fn func() error) error {
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
+}
+
+// watchIncoming 在前台终端里提示收到的东西，后台跑时输出到 /dev/null 无副作用。
+func watchIncoming(bus *events.Bus, ctx context.Context) {
+	ch, cancel := bus.Subscribe()
+	defer cancel()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-ch:
+			if !ok {
+				return
+			}
+			it, ok := asItem(ev.Data)
+			if !ok || it.Kind == core.KindText {
+				continue
+			}
+			ts := time.Now().Format("15:04:05")
+			name := it.FromName
+			if name == "" {
+				name = "对方"
+			}
+			switch ev.Type {
+			case core.EvItemNew:
+				if it.Status == core.StatusPending {
+					fmt.Printf("[%s] 收到 %s 的文件：%s（%s），等待确认 —— 执行 xlan inbox accept\n",
+						ts, name, it.Name, core.FormatBytes(it.Size))
+				} else {
+					fmt.Printf("[%s] %s 发来 %s（%s），已自动接收\n",
+						ts, name, it.Name, core.FormatBytes(it.Size))
+				}
+			case core.EvItemUpdate:
+				if it.Status == core.StatusDone {
+					fmt.Printf("[%s] 已收完：%s → %s\n", ts, it.Name, it.Path)
+				}
+			}
+		}
+	}
+}
+
+func asItem(v any) (core.Item, bool) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return core.Item{}, false
+	}
+	var it core.Item
+	if err := json.Unmarshal(b, &it); err != nil || it.ID == "" {
+		return core.Item{}, false
+	}
+	return it, true
 }

@@ -131,6 +131,7 @@ curl -N http://127.0.0.1:43003/v1/events
 - 分块上传失败自动重试 3 次；收到的字节区间会落库，服务重启后还能接着续传
 - `xlan send --limit 5M` 可以限速，避免把整条网占满
 - 每次发送会打印一个任务 id，`xlan sends` 能看到所有在跑的，`xlan pause <id>` 暂停；终端里也可以按 Ctrl-Z 切换
+- 服务在前台跑时，收到文件会在终端打印一行提示；后台跑则没有提示，需要 `xlan inbox` 自己查
 - 接收进度会出现在 `xlan inbox --watch` 的输出里
 - 每次收发都会记一条历史，`xlan log` 查看
 - 传输断掉后，`active` 的条目如果 5 分钟没有新数据会自动标记失败；也可以 `xlan inbox cancel` 立即清掉
