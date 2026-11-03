@@ -48,11 +48,15 @@ type OfferReq struct {
 }
 
 type OfferResp struct {
-	OK       bool   `json:"ok"`
-	ID       string `json:"id"`
-	Accepted bool   `json:"accepted"`
-	Status   string `json:"status"`
-	Msg      string `json:"msg,omitempty"`
+	OK        bool     `json:"ok"`
+	ID        string   `json:"id"`
+	Accepted  bool     `json:"accepted"`
+	Status    string   `json:"status"`
+	Msg       string   `json:"msg,omitempty"`
+	Duplicate bool     `json:"duplicate,omitempty"`
+	Path      string   `json:"path,omitempty"`
+	Resumed   bool     `json:"resumed,omitempty"`
+	DoneFiles []string `json:"done_files,omitempty"`
 }
 
 func Offer(ctx context.Context, base string, req OfferReq) (OfferResp, error) {

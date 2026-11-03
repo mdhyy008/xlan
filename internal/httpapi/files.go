@@ -48,6 +48,44 @@ func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
 		id = newID()
 	}
 
+	// 同名且内容相同：不用传了，直接指到已有文件。
+	if kind == core.KindFile && req.SHA256 != "" && req.Name != "" {
+		dest := filepath.Join(s.RecvDir(), sanitizeName(req.Name))
+		if st, err := os.Stat(dest); err == nil && !st.IsDir() && st.Size() == req.Size {
+			if sum, err := fileSHA256(dest); err == nil && strings.EqualFold(sum, req.SHA256) {
+				it := core.Item{
+					ID: id, Kind: kind, FromID: req.FromID, FromName: req.FromName,
+					ToID: s.Dev.ID, Channel: core.ChanDM, Name: req.Name,
+					Size: req.Size, SHA256: req.SHA256, Status: core.StatusDone,
+					Path: dest, CreatedAt: time.Now().Unix(),
+				}
+				if err := s.Store.AddItem(it); err != nil {
+					writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
+					return
+				}
+				s.Bus.Publish(core.Event{Type: core.EvItemNew, Ts: it.CreatedAt, Data: it})
+				writeJSON(w, http.StatusOK, map[string]any{
+					"ok": true, "id": id, "accepted": true, "status": "done",
+					"duplicate": true, "path": dest,
+				})
+				return
+			}
+		}
+	}
+
+	// 目录：同一个 transfer_id 已经收过一部分，就接着传，跳过已完成的文件。
+	if kind == core.KindFolder && req.TransferID != "" {
+		if old, ok, _ := s.Store.GetItem(req.TransferID); ok && old.Kind == core.KindFolder &&
+			(old.Status == core.StatusActive || old.Status == core.StatusDone) {
+			done := s.doneFiles(old.Path, *req.Manifest)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok": true, "id": old.ID, "accepted": true, "status": string(old.Status),
+				"resumed": true, "done_files": done,
+			})
+			return
+		}
+	}
+
 	accepted := false
 	if kind == core.KindText || s.AutoAccept {
 		accepted = true // 小文本、以及自动接收模式下，都不用确认

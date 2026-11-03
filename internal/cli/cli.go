@@ -108,7 +108,7 @@ func (a *App) usage() {
   xlan path on|off|status           把程序目录加进 PATH
   xlan serve [-d] [--auto-accept]   前台跑服务，-d 放后台，--auto-accept 自动接收
   xlan text <内容|-> [--to 设备]     发文本，省略 --to 就是公共
-  xlan send <文件|-> (--to 设备)     发文件，--all 群发，--limit 限速
+  xlan send <文件|目录|->... (--to 设备)  发文件，可多个，--all 群发，--limit 限速
   xlan inbox [-n 20] [--since 2h]   收件箱
   xlan inbox --watch                实时跟随
   xlan inbox accept|reject [序号]  处理待确认的传输
@@ -449,31 +449,46 @@ func (a *App) cmdSend(args []string) int {
 		}
 		a.Limit = v
 	}
-	arg := ""
-	if len(rest) > 0 {
-		arg = rest[0]
+	if len(rest) == 0 {
+		return a.fail("USAGE", core.ExitUsage, "用法：xlan send <文件|目录|->... --to 设备")
 	}
-	if arg == "" {
-		return a.fail("USAGE", core.ExitUsage, "用法：xlan send <文件|-> --to 设备")
-	}
-
-	src := arg
-	cleanup := func() {}
-	if arg == "-" {
-		tmp, err := bufferStdin()
-		if err != nil {
-			return a.fail("STDIN", core.ExitError, err.Error())
+	stdinCount := 0
+	for _, p := range rest {
+		if p == "-" {
+			stdinCount++
 		}
-		src = tmp
-		cleanup = func() { os.Remove(tmp) }
 	}
-	defer cleanup()
+	if stdinCount > 1 || (stdinCount == 1 && len(rest) > 1) {
+		return a.fail("USAGE", core.ExitUsage, "stdin（-）只能单独发，不能和其它路径混用")
+	}
 
-	st, err := os.Stat(src)
-	if err != nil {
-		return a.fail("NOT_FOUND", core.ExitError, err.Error())
+	// 先全部检查一遍，避免发了一半才发现后面路径不存在
+	type source struct {
+		path  string
+		size  int64
+		isDir bool
 	}
-	isDir := st.IsDir()
+	sources := make([]source, 0, len(rest))
+	cleanup := func() {}
+	defer func() { cleanup() }()
+
+	for _, p := range rest {
+		src := p
+		if p == "-" {
+			tmp, err := bufferStdin()
+			if err != nil {
+				return a.fail("STDIN", core.ExitError, err.Error())
+			}
+			src = tmp
+			prev := cleanup
+			cleanup = func() { prev(); os.Remove(tmp) }
+		}
+		st, err := os.Stat(src)
+		if err != nil {
+			return a.fail("NOT_FOUND", core.ExitError, err.Error())
+		}
+		sources = append(sources, source{path: src, size: st.Size(), isDir: st.IsDir()})
+	}
 
 	base, code := a.requireService()
 	if code != 0 {
@@ -517,29 +532,36 @@ func (a *App) cmdSend(args []string) int {
 		return a.fail("NO_PEER", core.ExitNoPeer, "没发现在线设备")
 	}
 
+	total := 0
 	failed := 0
 	lastCode := "ERROR"
-	for _, p := range targets {
-		var sendErr error
-		if isDir {
-			sendErr = a.sendFolder(ctx, p, src)
-		} else {
-			sendErr = a.sendOne(ctx, p, src, st.Size())
-		}
-		if err := sendErr; err != nil {
-			failed++
-			lastCode = classify(err)
-			a.warnf("%s: %v", p.Name, err)
-			if a.JSON {
-				a.emit(map[string]any{"ok": false, "peer": p.Name, "code": lastCode, "msg": err.Error()})
+	for _, srcIt := range sources {
+		for _, p := range targets {
+			total++
+			var sendErr error
+			if srcIt.isDir {
+				sendErr = a.sendFolder(ctx, p, srcIt.path)
+			} else {
+				sendErr = a.sendOne(ctx, p, srcIt.path, srcIt.size)
 			}
-		} else if a.JSON {
-			a.emit(map[string]any{"ok": true, "peer": p.Name, "id": p.ID, "size": st.Size()})
-		} else {
-			fmt.Fprintf(a.Out, "已发送给 %s\n", p.Name)
+			name := filepath.Base(srcIt.path)
+			if err := sendErr; err != nil {
+				failed++
+				lastCode = classify(err)
+				a.warnf("%s: %v", name, err)
+				if a.JSON {
+					a.emit(map[string]any{"ok": false, "file": name, "peer": p.Name, "code": lastCode, "msg": err.Error()})
+				}
+			} else if a.JSON {
+				a.emit(map[string]any{"ok": true, "file": name, "peer": p.Name, "id": p.ID, "size": srcIt.size})
+			} else if len(sources) == 1 {
+				fmt.Fprintf(a.Out, "已发送给 %s\n", p.Name)
+			} else {
+				fmt.Fprintf(a.Out, "已发送 %s → %s\n", name, p.Name)
+			}
 		}
 	}
-	if failed == len(targets) {
+	if failed == total {
 		return exitForCode(lastCode)
 	}
 	return core.ExitOK
@@ -576,6 +598,15 @@ func (a *App) sendOne(ctx context.Context, peer core.Peer, src string, size int6
 	})
 	if err != nil {
 		return err
+	}
+	if resp.Duplicate {
+		if a.JSON {
+			a.emit(map[string]any{"ok": true, "file": filepath.Base(src), "peer": peer.Name,
+				"duplicate": true, "path": resp.Path})
+		} else {
+			fmt.Fprintf(a.Out, "%s 已经有同一个文件了，没再传。\n", peer.Name)
+		}
+		return nil
 	}
 	if !resp.Accepted {
 		a.warnf("等待 %s 确认…", peer.Name)
@@ -1171,7 +1202,8 @@ func (a *App) sendFolder(ctx context.Context, peer core.Peer, root string) error
 
 	resp, err := client.Offer(ctx, base, client.OfferReq{
 		FromID: a.self().ID, FromName: a.self().Name, ToID: peer.ID,
-		Kind: string(core.KindFolder), Name: m.Root, Size: m.TotalSize(), Manifest: &m,
+		Kind: string(core.KindFolder), Name: m.Root, Size: m.TotalSize(),
+		Manifest: &m, TransferID: manifestID(m),
 	})
 	if err != nil {
 		return err
@@ -1187,9 +1219,22 @@ func (a *App) sendFolder(ctx context.Context, peer core.Peer, root string) error
 	bar := newProgress(a.Err, "发送 "+m.Root, m.TotalSize(), a.showProgress())
 	defer bar.finish()
 
+	skip := map[string]bool{}
+	for _, rel := range resp.DoneFiles {
+		skip[rel] = true
+	}
+	if len(skip) > 0 {
+		a.warnf("续传：跳过 %d 个已经传完的文件", len(skip))
+	}
+
 	var sent int64
 	for _, e := range m.Entries {
 		if e.Dir {
+			continue
+		}
+		if skip[e.Rel] {
+			sent += e.Size
+			bar.update(sent)
 			continue
 		}
 		src := filepath.Join(root, filepath.FromSlash(e.Rel))
@@ -1749,4 +1794,14 @@ func (a *App) batch(action string, want []core.Status, verb string) int {
 		return core.ExitError
 	}
 	return core.ExitOK
+}
+
+// manifestID 由目录结构算出一个稳定的 id，同一个目录重发时可以接着传。
+func manifestID(m core.Manifest) string {
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\n", m.Root)
+	for _, e := range m.Entries {
+		fmt.Fprintf(h, "%s|%v|%d|%s\n", e.Rel, e.Dir, e.Size, e.SHA256)
+	}
+	return "d" + hex.EncodeToString(h.Sum(nil))[:15]
 }

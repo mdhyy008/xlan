@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -326,6 +327,29 @@ func localOnly(h http.HandlerFunc) http.HandlerFunc {
 		}
 		h(w, r)
 	}
+}
+
+// doneFiles 找出目录清单里已经完整落盘的文件（尺寸对得上）。
+func (s *Server) doneFiles(root string, m core.Manifest) []string {
+	out := []string{}
+	if root == "" {
+		return out
+	}
+	for _, e := range m.Entries {
+		if e.Dir {
+			continue
+		}
+		p, err := safeJoin(root, e.Rel)
+		if err != nil {
+			continue
+		}
+		st, err := os.Stat(p)
+		if err != nil || st.IsDir() || st.Size() != e.Size {
+			continue
+		}
+		out = append(out, e.Rel)
+	}
+	return out
 }
 
 // handleRestart 空闲就重启，有传输在跑就等它们跑完再重启。
