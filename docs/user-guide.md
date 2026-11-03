@@ -135,20 +135,17 @@ xlan scan
 
 ## 有两台机器同名怎么办
 
-局域网里两台电脑都叫 `macbook` 很常见。这时候直接用名字会报错：
+局域网里两台电脑都叫 `macbook` 很常见。直接用名字会发给**列表里靠前的那台**，不一定是你想要的。
 
-```
-xlan send 报告.pdf --to macbook
-xlan: "macbook" 匹配到 2 台设备，请用 id 指定：macbook(ee55ff66)，macbook(aa11bb22)
-```
+想指定具体一台，用 **IP 地址**或 **id 前缀**：
 
-名字后面括号里那 8 位就是它的 id 前缀，**取前 4 位以上**就能指定：
-
-```
+```bash
+xlan scan                          # 先看地址和 id
+xlan send 报告.pdf --to 192.168.1.9
 xlan send 报告.pdf --to aa11
 ```
 
-不知道谁是谁的话，先 `xlan scan` 看一遍，里面有完整 id 和地址。
+名字后面括号里的 8 位就是 id 前缀，取前 4 位以上足够。
 
 ## 发文件
 

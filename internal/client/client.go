@@ -371,7 +371,7 @@ func CleanInbox(ctx context.Context, base string, olderThanSec int64, withFiles,
 
 // AddHistory 上报一条收发记录。
 func AddHistory(ctx context.Context, base string, rec core.TransferRecord) error {
-	return postJSON(ctx, base+"/v1/history", rec, nil)
+	return postJSON(ctx, urlOf(base)+"/v1/history", rec, nil)
 }
 
 // History 取最近的收发记录。

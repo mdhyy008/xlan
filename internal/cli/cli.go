@@ -1423,47 +1423,34 @@ func resolvePeer(peers []core.Peer, target string) (core.Peer, error) {
 			return p, nil
 		}
 	}
-	// 2. id 前缀（至少 4 位，避免误匹配）
+	// 2. id 前缀（至少 4 位）
 	if len(target) >= 4 {
-		var m []core.Peer
 		for _, p := range peers {
 			if strings.HasPrefix(p.ID, target) {
-				m = append(m, p)
+				return p, nil
 			}
 		}
-		if len(m) == 1 {
-			return m[0], nil
-		}
-		if len(m) > 1 {
-			return core.Peer{}, ambiguousPeer(target, m)
+	}
+	// 3. IP 地址
+	if ip := net.ParseIP(target); ip != nil {
+		for _, p := range peers {
+			if p.Addr == target || (net.ParseIP(p.Addr) != nil && net.ParseIP(p.Addr).Equal(ip)) {
+				return p, nil
+			}
 		}
 	}
-	// 3. 完整名字
+	// 4. 完整名字，重名时取第一个
 	t := strings.ToLower(target)
-	var exact []core.Peer
 	for _, p := range peers {
 		if strings.ToLower(p.Name) == t {
-			exact = append(exact, p)
+			return p, nil
 		}
 	}
-	if len(exact) == 1 {
-		return exact[0], nil
-	}
-	if len(exact) > 1 {
-		return core.Peer{}, ambiguousPeer(target, exact)
-	}
-	// 4. 名字前缀
-	var pref []core.Peer
+	// 5. 名字前缀
 	for _, p := range peers {
 		if strings.HasPrefix(strings.ToLower(p.Name), t) {
-			pref = append(pref, p)
+			return p, nil
 		}
-	}
-	if len(pref) == 1 {
-		return pref[0], nil
-	}
-	if len(pref) > 1 {
-		return core.Peer{}, ambiguousPeer(target, pref)
 	}
 	return core.Peer{}, fmt.Errorf("找不到设备 %q", target)
 }

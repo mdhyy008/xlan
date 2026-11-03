@@ -742,7 +742,7 @@ func (s *Server) pushText(ctx context.Context, peer core.Peer, ch core.Channel, 
 	return err
 }
 
-// resolvePeer 支持完整 id、id 前缀、设备名；重名或前缀撞车时报错，不瞎猜。
+// resolvePeer 支持完整 id、id 前缀、IP、设备名（重名取第一个）。
 func (s *Server) resolvePeer(target string) (core.Peer, error) {
 	peers, err := s.Store.ListPeers()
 	if err != nil {
@@ -754,47 +754,32 @@ func (s *Server) resolvePeer(target string) (core.Peer, error) {
 		}
 	}
 	if len(target) >= 4 {
-		var m []core.Peer
 		for _, p := range peers {
 			if strings.HasPrefix(p.ID, target) {
-				m = append(m, p)
+				return p, nil
 			}
 		}
-		if len(m) == 1 {
-			return m[0], nil
-		}
-		if len(m) > 1 {
-			return core.Peer{}, ambiguous(target, m)
+	}
+	if ip := net.ParseIP(target); ip != nil {
+		for _, p := range peers {
+			if pip := net.ParseIP(p.Addr); pip != nil && pip.Equal(ip) {
+				return p, nil
+			}
 		}
 	}
 	t := strings.ToLower(target)
-	var exact []core.Peer
 	for _, p := range peers {
 		if strings.ToLower(p.Name) == t {
-			exact = append(exact, p)
+			return p, nil
 		}
 	}
-	if len(exact) == 1 {
-		return exact[0], nil
-	}
-	if len(exact) > 1 {
-		return core.Peer{}, ambiguous(target, exact)
-	}
-	var pref []core.Peer
 	for _, p := range peers {
 		if strings.HasPrefix(strings.ToLower(p.Name), t) {
-			pref = append(pref, p)
+			return p, nil
 		}
-	}
-	if len(pref) == 1 {
-		return pref[0], nil
-	}
-	if len(pref) > 1 {
-		return core.Peer{}, ambiguous(target, pref)
 	}
 	return core.Peer{}, fmt.Errorf("找不到设备 %q", target)
 }
-
 func ambiguous(target string, m []core.Peer) error {
 	parts := make([]string, 0, len(m))
 	for _, p := range m {
