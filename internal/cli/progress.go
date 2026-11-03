@@ -7,6 +7,9 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"xlan/core"
@@ -205,4 +208,87 @@ func (a *App) followTransfer(base string, it core.Item) {
 			return
 		}
 	}
+}
+
+// bucket 是一个简单的令牌桶，用来限速。
+type bucket struct {
+	mu     sync.Mutex
+	rate   int64
+	tokens float64
+	last   time.Time
+}
+
+func newBucket(rate int64) *bucket {
+	if rate <= 0 {
+		return nil
+	}
+	return &bucket{rate: rate, tokens: float64(rate) / 4, last: time.Now()}
+}
+
+func (b *bucket) wait(n int) {
+	if b == nil || b.rate <= 0 || n <= 0 {
+		return
+	}
+	for n > 0 {
+		b.mu.Lock()
+		now := time.Now()
+		b.tokens += now.Sub(b.last).Seconds() * float64(b.rate)
+		if b.tokens > float64(b.rate) {
+			b.tokens = float64(b.rate) // 最多攒一秒的量
+		}
+		b.last = now
+		avail := int(b.tokens)
+		if avail <= 0 {
+			need := time.Duration(float64(n) / float64(b.rate) * float64(time.Second))
+			b.mu.Unlock()
+			time.Sleep(need)
+			continue
+		}
+		take := n
+		if take > avail {
+			take = avail
+		}
+		b.tokens -= float64(take)
+		n -= take
+		b.mu.Unlock()
+	}
+}
+
+type rateReader struct {
+	r io.Reader
+	b *bucket
+}
+
+func (rr *rateReader) Read(p []byte) (int, error) {
+	n, err := rr.r.Read(p)
+	if n > 0 {
+		rr.b.wait(n)
+	}
+	return n, err
+}
+
+// parseLimit 解析 "5M" / "500K" / "1048576" 这类限速写法。
+func parseLimit(s string) (int64, error) {
+	s = strings.TrimSpace(strings.ToUpper(s))
+	if s == "" || s == "0" {
+		return 0, nil
+	}
+	mult := int64(1)
+	switch {
+	case strings.HasSuffix(s, "K"):
+		mult, s = 1024, strings.TrimSuffix(s, "K")
+	case strings.HasSuffix(s, "M"):
+		mult, s = 1024*1024, strings.TrimSuffix(s, "M")
+	case strings.HasSuffix(s, "G"):
+		mult, s = 1024*1024*1024, strings.TrimSuffix(s, "G")
+	case strings.HasSuffix(s, "KB"):
+		mult, s = 1024, strings.TrimSuffix(s, "KB")
+	case strings.HasSuffix(s, "MB"):
+		mult, s = 1024*1024, strings.TrimSuffix(s, "MB")
+	}
+	n, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("限速写法不对：%q，例如 5M、500K", s)
+	}
+	return int64(n * float64(mult)), nil
 }

@@ -112,8 +112,40 @@ func (s *Server) bumpCommitted(id string, n int64) {
 	}
 }
 
+// loadRanges 从库里恢复续传区间，服务重启后还能接着传。
+func (s *Server) loadRanges(id string) {
+	s.rangeMu.Lock()
+	_, known := s.ranges[id]
+	s.rangeMu.Unlock()
+	if known {
+		return
+	}
+	raw, err := s.Store.GetRanges(id)
+	if err != nil || raw == "" {
+		return
+	}
+	var spans []span
+	if json.Unmarshal([]byte(raw), &spans) != nil {
+		return
+	}
+	ss := &spanSet{}
+	for _, sp := range spans {
+		ss.add(sp.Start, sp.End)
+	}
+	s.rangeMu.Lock()
+	if s.ranges == nil {
+		s.ranges = make(map[string]*spanSet)
+	}
+	if _, ok := s.ranges[id]; !ok {
+		s.ranges[id] = ss
+	}
+	s.rangeMu.Unlock()
+}
+
 // markRange 记录收到的一段字节，返回累计覆盖量和是否收齐。
 func (s *Server) markRange(id string, start, end, total int64) (int64, bool) {
+	s.loadRanges(id)
+
 	s.rangeMu.Lock()
 	if s.ranges == nil {
 		s.ranges = make(map[string]*spanSet)
@@ -124,7 +156,12 @@ func (s *Server) markRange(id string, start, end, total int64) (int64, bool) {
 		s.ranges[id] = ss
 	}
 	cov := ss.add(start, end)
+	spans := append([]span(nil), ss.spans...)
 	s.rangeMu.Unlock()
+
+	if b, err := json.Marshal(spans); err == nil {
+		_ = s.Store.SetRanges(id, string(b))
+	}
 
 	complete := total > 0 && cov >= total
 	return cov, complete
@@ -132,6 +169,7 @@ func (s *Server) markRange(id string, start, end, total int64) (int64, bool) {
 
 // rangePrefix 返回从 0 开始连续收到的长度。
 func (s *Server) rangePrefix(id string) int64 {
+	s.loadRanges(id)
 	s.rangeMu.Lock()
 	defer s.rangeMu.Unlock()
 	if ss := s.ranges[id]; ss != nil {
@@ -144,6 +182,7 @@ func (s *Server) clearRanges(id string) {
 	s.rangeMu.Lock()
 	delete(s.ranges, id)
 	s.rangeMu.Unlock()
+	_ = s.Store.SetRanges(id, "")
 }
 
 // clearProgress 在传输结束时清掉状态。

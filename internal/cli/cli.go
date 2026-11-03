@@ -38,8 +38,11 @@ type App struct {
 	JSON    bool
 	Quiet   bool
 	Timeout time.Duration
+	Limit   int64 // 字节/秒，0 表示不限速
 	Out     io.Writer
 	Err     io.Writer
+
+	limiter *bucket
 
 	// Dev 缓存本机身份；测试里可直接注入。
 	Dev core.Device
@@ -105,10 +108,11 @@ func (a *App) usage() {
   xlan path on|off|status           把程序目录加进 PATH
   xlan serve [-d]                   前台跑服务，-d 放后台
   xlan text <内容|-> [--to 设备]     发文本，省略 --to 就是公共
-  xlan send <文件|-> (--to 设备)     发文件，--all 群发
+  xlan send <文件|-> (--to 设备)     发文件，--all 群发，--limit 限速
   xlan inbox [-n 20] [--since 2h]   收件箱
   xlan inbox --watch                实时跟随
-  xlan inbox accept|reject [序号]  处理待确认的传输（只有一条时可不写）
+  xlan inbox accept|reject [序号]  处理待确认的传输
+  xlan inbox cancel [序号]         取消卡住的传输
   xlan recv <id> [--out 路径] [-o -]  取出内容
   xlan trust add|rm <设备> | list   信任白名单
   xlan config [get|set|unset]       查看和修改配置
@@ -421,12 +425,20 @@ func (a *App) cmdSend(args []string) int {
 	fs := a.flags("send")
 	to := fs.String("to", "", "目标设备")
 	all := fs.Bool("all", false, "群发给所有在线设备")
+	limit := fs.String("limit", "", "限速，比如 5M、500K")
 	rest, err := parseInterspersed(fs, args)
 	if err != nil {
 		return core.ExitUsage
 	}
 	if err := a.load(); err != nil {
 		return a.fail("CONFIG", core.ExitError, err.Error())
+	}
+	if *limit != "" {
+		v, err := parseLimit(*limit)
+		if err != nil {
+			return a.fail("LIMIT", core.ExitUsage, err.Error())
+		}
+		a.Limit = v
 	}
 	arg := ""
 	if len(rest) > 0 {
@@ -572,7 +584,9 @@ func (a *App) sendOne(ctx context.Context, peer core.Peer, src string, size int6
 	defer bar.finish()
 
 	err = a.uploadOne(ctx, size, a.Cfg.Threads, bar.update, func(ctx context.Context, off, n int64) error {
-		return client.PutRange(ctx, base, resp.ID, io.NewSectionReader(f, off, n), off, n, size)
+		return a.putWithRetry(func() error {
+			return client.PutRange(ctx, base, resp.ID, a.rate(io.NewSectionReader(f, off, n)), off, n, size)
+		})
 	})
 	if err != nil {
 		return err
@@ -620,7 +634,7 @@ func (a *App) cmdInbox(args []string) int {
 	if len(rest) > 1 {
 		subID = rest[1]
 	}
-	if sub == "accept" || sub == "reject" {
+	if sub == "accept" || sub == "reject" || sub == "cancel" {
 		return a.decide(sub, subID, *noWait)
 	}
 
@@ -704,7 +718,11 @@ func (a *App) decide(action, arg string, noWait bool) int {
 	if err != nil {
 		return a.fail("INBOX", core.ExitError, err.Error())
 	}
-	target, err := pickTarget(items, arg)
+	allow := []core.Status{core.StatusPending}
+	if action == "cancel" {
+		allow = []core.Status{core.StatusPending, core.StatusActive}
+	}
+	target, err := pickTarget(items, arg, allow...)
 	if err != nil {
 		return a.fail("USAGE", core.ExitUsage, err.Error())
 	}
@@ -715,7 +733,8 @@ func (a *App) decide(action, arg string, noWait bool) int {
 	if a.JSON {
 		a.emit(map[string]any{"ok": true, "id": target.ID, "action": action})
 	} else {
-		fmt.Fprintf(a.Out, "已%s %s\n", map[string]string{"accept": "接收", "reject": "拒收"}[action], describeTarget(target))
+		verb := map[string]string{"accept": "接收", "reject": "拒收", "cancel": "取消"}[action]
+		fmt.Fprintf(a.Out, "已%s %s\n", verb, describeTarget(target))
 	}
 
 	if action == "accept" && !noWait && a.showProgress() && target.Kind != core.KindText {
@@ -728,13 +747,24 @@ func (a *App) decide(action, arg string, noWait bool) int {
 const inboxListLimit = 20
 
 // pickTarget 把"不带参数 / 序号 / id 前缀"统一解析成具体的条目 id。
-func pickTarget(items []core.Item, arg string) (core.Item, error) {
+func pickTarget(items []core.Item, arg string, allow ...core.Status) (core.Item, error) {
+	if len(allow) == 0 {
+		allow = []core.Status{core.StatusPending}
+	}
+	usable := func(s core.Status) bool {
+		for _, a := range allow {
+			if a == s {
+				return true
+			}
+		}
+		return false
+	}
 	arg = strings.TrimSpace(arg)
 
 	if arg == "" {
 		var pending []core.Item
 		for _, it := range items {
-			if it.Status == core.StatusPending {
+			if usable(it.Status) {
 				pending = append(pending, it)
 			}
 		}
@@ -751,8 +781,8 @@ func pickTarget(items []core.Item, arg string) (core.Item, error) {
 	// 1..20 之间当序号；其余当 id 前缀
 	if n, err := strconv.Atoi(arg); err == nil && n >= 1 && n <= len(items) {
 		it := items[n-1]
-		if it.Status != core.StatusPending {
-			return core.Item{}, fmt.Errorf("第 %d 条已经是 %s，不需要确认", n, it.Status)
+		if !usable(it.Status) {
+			return core.Item{}, fmt.Errorf("第 %d 条是 %s，不能这样操作", n, it.Status)
 		}
 		return it, nil
 	}
@@ -813,6 +843,25 @@ func (a *App) cmdRecv(args []string) int {
 		if err := os.WriteFile(*out, []byte(it.Body), 0o644); err != nil {
 			return a.fail("WRITE", core.ExitError, err.Error())
 		}
+	case it.Kind == core.KindFolder:
+		if it.Path == "" {
+			return a.fail("NO_PATH", core.ExitError, "这个文件夹还没有落盘")
+		}
+		if *out == "" || *out == "-" {
+			if a.JSON {
+				a.emit(map[string]any{"ok": true, "kind": "folder", "path": it.Path})
+			} else {
+				fmt.Fprintf(a.Out, "文件夹已经在 %s\n", it.Path)
+			}
+			return core.ExitOK
+		}
+		if err := copyTree(it.Path, *out); err != nil {
+			return a.fail("COPY", core.ExitError, err.Error())
+		}
+		if !a.JSON {
+			fmt.Fprintf(a.Out, "已复制到 %s\n", *out)
+		}
+		return core.ExitOK
 	case it.Path == "":
 		return a.fail("NO_PATH", core.ExitError, "这条记录还没有落盘")
 	default:
@@ -1018,16 +1067,19 @@ func formatItem(it core.Item) string {
 	if who == "" {
 		who = it.FromID
 	}
-	switch it.Kind {
-	case core.KindText:
+	if it.Kind == core.KindText {
 		tag := "私聊"
 		if it.Channel == core.ChanPublic {
 			tag = "公共"
 		}
 		return fmt.Sprintf("%s [%s] %s: %s", ts, tag, who, it.Body)
-	default:
-		return fmt.Sprintf("%s [文件] %s: %s (%d 字节) %s", ts, who, it.Name, it.Size, it.Status)
 	}
+
+	tag := "文件"
+	if it.Kind == core.KindFolder {
+		tag = "文件夹"
+	}
+	return fmt.Sprintf("%s [%s] %s: %s (%s) %s", ts, tag, who, it.Name, humanBytes(it.Size), it.Status)
 }
 
 func classify(err error) string {
@@ -1213,7 +1265,9 @@ func (a *App) uploadFile(ctx context.Context, base, id, rel, src string, size in
 	defer f.Close()
 
 	return a.uploadOne(ctx, size, a.Cfg.Threads, onChunk, func(ctx context.Context, off, n int64) error {
-		return client.PutFileRange(ctx, base, id, rel, io.NewSectionReader(f, off, n), off, n, size)
+		return a.putWithRetry(func() error {
+			return client.PutFileRange(ctx, base, id, rel, a.rate(io.NewSectionReader(f, off, n)), off, n, size)
+		})
 	})
 }
 
@@ -1557,4 +1611,51 @@ func (a *App) installCmd(name string, args []string,
 		return core.ExitOK
 	}
 	return a.fail("USAGE", core.ExitUsage, "用法：xlan "+name+" on|off|status")
+}
+
+// copyTree 把整个目录复制到 dst（dst 不存在就建）。
+func copyTree(src, dst string) error {
+	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		return copyFileTo(p, target)
+	})
+}
+
+// rate 按 --limit 包一层限速。
+func (a *App) rate(r io.Reader) io.Reader {
+	if a.Limit <= 0 {
+		return r
+	}
+	if a.limiter == nil {
+		a.limiter = newBucket(a.Limit)
+	}
+	return &rateReader{r: r, b: a.limiter}
+}
+
+// putWithRetry 给单个分块加重试，断一下不至于整条重来。
+func (a *App) putWithRetry(fn func() error) error {
+	const attempts = 3
+	var err error
+	for i := 0; i < attempts; i++ {
+		if err = fn(); err == nil {
+			return nil
+		}
+		if i < attempts-1 {
+			time.Sleep(time.Duration(i+1) * 400 * time.Millisecond)
+		}
+	}
+	return err
 }

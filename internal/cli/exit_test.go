@@ -28,3 +28,27 @@ func TestClassifyAndExitCode(t *testing.T) {
 		}
 	}
 }
+
+func TestParseLimit(t *testing.T) {
+	ok := map[string]int64{
+		"":        0,
+		"0":       0,
+		"1048576": 1048576,
+		"5M":      5 << 20,
+		"500K":    500 << 10,
+		"1G":      1 << 30,
+		"2MB":     2 << 20,
+		"1.5M":    1572864,
+	}
+	for in, want := range ok {
+		got, err := parseLimit(in)
+		if err != nil || got != want {
+			t.Errorf("parseLimit(%q) = %d, %v; want %d", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"abc", "5X"} {
+		if _, err := parseLimit(bad); err == nil {
+			t.Errorf("parseLimit(%q) 应该报错", bad)
+		}
+	}
+}

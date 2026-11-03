@@ -159,6 +159,12 @@ xlan config set threads 4
 
 主要对几百 MB 的大文件有用；几十 KB 的小文件快不了多少。
 
+不想占满整条网（比如还要同时开视频会议），可以限速：
+
+```
+xlan send 大文件.iso --to 小王的电脑 --limit 5M
+```
+
 ## 发整个文件夹
 
 一模一样：
@@ -228,6 +234,12 @@ xlan inbox accept 2
 ```
 
 不想要，把 `accept` 换成 `reject` 就行。
+
+传了一半对方断了、一直显示 `active` 不动了，用这个清掉：
+
+```
+xlan inbox cancel
+```
 
 ### 人不在电脑前
 
@@ -304,6 +316,7 @@ xlan text "内容" --to 名字          发文字给某个人
 xlan inbox                         看收到的东西
 xlan inbox accept [序号]           接收（只有一条时不用写序号）
 xlan inbox reject [序号]           拒收
+xlan inbox cancel [序号]           取消卡住的传输
 xlan trust add 名字                 以后这个人的东西直接收
 xlan config set recv_dir 路径       换收件目录
 xlan doctor                        出问题时自检

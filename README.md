@@ -63,6 +63,7 @@ xlan recv <id> -o -   # 把内容管道出去
 | `xlan inbox` | 收件箱，默认最新 20 条 |
 | `xlan inbox --watch` | 实时跟随 |
 | `xlan inbox accept\|reject [序号]` | 处理待确认的传输，只有一条时可不写 |
+| `xlan inbox cancel [序号]` | 取消卡住的传输 |
 | `xlan recv <id> [--out 路径] [-o -]` | 取出内容，`-` 表示 stdout |
 | `xlan trust add\|rm\|list` | 信任白名单 |
 | `xlan config [get\|set\|unset]` | 查看和修改配置 |
@@ -118,6 +119,8 @@ curl -N http://127.0.0.1:43003/v1/events
 - 文件超过 1MB 分块上传，支持断点续传，落地前校验 sha256，`rename` 原子完成
 - 发送和接收都会在 stderr 上实时显示百分比、已传/总量和速度；只有终端里才画，管道里不刷屏
 - 传大文件可以用多线程分块发送：`xlan config set threads 4`（1–8，默认 4，只影响本机发送）
+- 分块上传失败自动重试 3 次；收到的字节区间会落库，服务重启后还能接着续传
+- `xlan send --limit 5M` 可以限速，避免把整条网占满
 - 公共文本走 UDP 广播，单包 1000 字节以内；超长自动降级为逐台 TCP 投递
 - 公共文本会等 600ms 收对方回执，零回执不等于失败，但会提示可能被 AP 隔离
 - 不信任的设备发文件会挂起，等你 `xlan inbox accept`；文本自动接收

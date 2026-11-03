@@ -146,6 +146,26 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "no such offer")
 		return
 	}
+	// cancel 可以作用在 pending 和 active 上，用来清理卡死的传输。
+	if req.Action == "cancel" {
+		if it.Status == core.StatusDone || it.Status == core.StatusFailed {
+			writeErr(w, http.StatusConflict, "FINISHED", "这条已经结束了")
+			return
+		}
+		s.clearProgress(id)
+		s.clearRanges(id)
+		s.clear(id)
+		s.maybeRestart()
+		if err := s.Store.UpdateItemStatus(id, core.StatusFailed, it.Path); err != nil {
+			writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
+			return
+		}
+		s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(),
+			Data: map[string]any{"id": id, "status": string(core.StatusFailed)}})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "failed"})
+		return
+	}
+
 	if it.Status != core.StatusPending {
 		writeErr(w, http.StatusConflict, "NOT_PENDING", "offer is "+string(it.Status))
 		return

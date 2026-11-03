@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS items (
   status     TEXT NOT NULL,
   path       TEXT,
   manifest   TEXT,
+  ranges     TEXT,
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at DESC);
@@ -62,6 +63,7 @@ func Open(path string) (*Store, error) {
 	}
 	// 旧库补列，失败说明列已存在。
 	_, _ = db.Exec(`ALTER TABLE items ADD COLUMN manifest TEXT`)
+	_, _ = db.Exec(`ALTER TABLE items ADD COLUMN ranges TEXT`)
 	return &Store{db: db}, nil
 }
 
@@ -159,6 +161,20 @@ func (s *Store) GetManifest(id string) (string, error) {
 		return "", nil
 	}
 	return m.String, err
+}
+
+func (s *Store) SetRanges(id, data string) error {
+	_, err := s.db.Exec(`UPDATE items SET ranges = ? WHERE id = ?`, data, id)
+	return err
+}
+
+func (s *Store) GetRanges(id string) (string, error) {
+	var v sql.NullString
+	err := s.db.QueryRow(`SELECT ranges FROM items WHERE id = ?`, id).Scan(&v)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return v.String, err
 }
 
 func (s *Store) DeleteItem(id string) error {

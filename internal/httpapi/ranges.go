@@ -2,7 +2,10 @@ package httpapi
 
 import "sort"
 
-type span struct{ start, end int64 }
+type span struct {
+	Start int64 `json:"s"`
+	End   int64 `json:"e"`
+}
 
 // spanSet 记录一个文件已经收到哪些字节区间，支持乱序到达。
 type spanSet struct {
@@ -14,19 +17,19 @@ func (ss *spanSet) add(a, b int64) int64 {
 	if b <= a {
 		return ss.covered
 	}
-	ss.spans = append(ss.spans, span{a, b})
+	ss.spans = append(ss.spans, span{Start: a, End: b})
 	sort.Slice(ss.spans, func(i, j int) bool {
-		if ss.spans[i].start == ss.spans[j].start {
-			return ss.spans[i].end < ss.spans[j].end
+		if ss.spans[i].Start == ss.spans[j].Start {
+			return ss.spans[i].End < ss.spans[j].End
 		}
-		return ss.spans[i].start < ss.spans[j].start
+		return ss.spans[i].Start < ss.spans[j].Start
 	})
 
 	out := make([]span, 0, len(ss.spans))
 	for _, sp := range ss.spans {
-		if n := len(out); n > 0 && sp.start <= out[n-1].end {
-			if sp.end > out[n-1].end {
-				out[n-1].end = sp.end
+		if n := len(out); n > 0 && sp.Start <= out[n-1].End {
+			if sp.End > out[n-1].End {
+				out[n-1].End = sp.End
 			}
 			continue
 		}
@@ -36,7 +39,7 @@ func (ss *spanSet) add(a, b int64) int64 {
 
 	var cov int64
 	for _, sp := range out {
-		cov += sp.end - sp.start
+		cov += sp.End - sp.Start
 	}
 	ss.covered = cov
 	return cov
@@ -44,8 +47,8 @@ func (ss *spanSet) add(a, b int64) int64 {
 
 // prefix 返回从 0 开始连续收到多长，续传时用这个位置。
 func (ss *spanSet) prefix() int64 {
-	if len(ss.spans) == 0 || ss.spans[0].start != 0 {
+	if len(ss.spans) == 0 || ss.spans[0].Start != 0 {
 		return 0
 	}
-	return ss.spans[0].end
+	return ss.spans[0].End
 }
