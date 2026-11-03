@@ -17,16 +17,10 @@ xlan send 报告.pdf --to 小王的电脑
 **收的那台**，第一次会等你点头，敲：
 
 ```
-xlan inbox
+xlan inbox accept
 ```
 
-看到那条记录，照着它的编号敲：
-
-```
-xlan inbox accept 1793721117349724086-a4105427
-```
-
-文件就出现在「下载」文件夹里的 `xlan` 里了。
+只有一条待接收时，这条命令直接就收了。文件会出现在「下载」文件夹里的 `xlan` 里。
 
 ---
 
@@ -145,17 +139,21 @@ xlan inbox
 11-04 00:06 [文件] 小王的电脑: 报告.pdf (2048 字节) pending
 ```
 
-`pending` 就是「等你确认」。照着前面那串编号敲：
+`pending` 就是「等你确认」。直接敲：
 
 ```
-xlan inbox accept 1793721117349724086-a4105427
+xlan inbox accept
 ```
 
-不想要就：
+只有一条待接收时会自动选中。
+
+如果列表里有好几条待接收的，就加上前面的序号：
 
 ```
-xlan inbox reject 1793721117349724086-a4105427
+xlan inbox accept 2
 ```
+
+不想要，把 `accept` 换成 `reject` 就行。
 
 ### 人不在电脑前
 
@@ -223,8 +221,8 @@ xlan send 文件夹 --to 名字          发整个文件夹
 xlan text "内容"                    发文字给所有人
 xlan text "内容" --to 名字          发文字给某个人
 xlan inbox                         看收到的东西
-xlan inbox accept 编号              接收
-xlan inbox reject 编号              拒收
+xlan inbox accept [序号]           接收（只有一条时不用写序号）
+xlan inbox reject [序号]           拒收
 xlan trust add 名字                 以后这个人的东西直接收
 xlan config set recv_dir 路径       换收件目录
 xlan doctor                        出问题时自检

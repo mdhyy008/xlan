@@ -96,7 +96,7 @@ func (a *App) usage() {
   xlan send <文件|-> (--to 设备)     发文件，--all 群发
   xlan inbox [-n 20] [--since 2h]   收件箱
   xlan inbox --watch                实时跟随
-  xlan inbox accept|reject <id>     处理待确认的传输
+  xlan inbox accept|reject [序号]  处理待确认的传输（只有一条时可不写）
   xlan recv <id> [--out 路径] [-o -]  取出内容
   xlan trust add|rm <设备> | list   信任白名单
   xlan config [get|set|unset]       查看和修改配置
@@ -580,8 +580,8 @@ func (a *App) cmdInbox(args []string) int {
 		fmt.Fprintln(a.Out, "收件箱是空的。")
 		return core.ExitOK
 	}
-	for _, it := range items {
-		fmt.Fprintln(a.Out, formatItem(it))
+	for i, it := range items {
+		fmt.Fprintf(a.Out, "%d) %s\n", i+1, formatItem(it))
 	}
 	return core.ExitOK
 }
@@ -623,23 +623,83 @@ func (a *App) watchInbox(ctx context.Context, base string) int {
 	}
 }
 
-func (a *App) decide(action, id string) int {
-	if id == "" {
-		return a.fail("USAGE", core.ExitUsage, "用法：xlan inbox "+action+" <id>")
-	}
+func (a *App) decide(action, arg string) int {
 	base, code := a.ensure()
 	if code != 0 {
 		return code
 	}
-	if err := client.Decision(context.Background(), base, id, action); err != nil {
+	ctx := context.Background()
+
+	items, err := client.Inbox(ctx, base, inboxListLimit, 0)
+	if err != nil {
+		return a.fail("INBOX", core.ExitError, err.Error())
+	}
+	target, err := pickTarget(items, arg)
+	if err != nil {
+		return a.fail("USAGE", core.ExitUsage, err.Error())
+	}
+
+	if err := client.Decision(ctx, base, target.ID, action); err != nil {
 		return a.fail("DECISION", core.ExitError, err.Error())
 	}
 	if a.JSON {
-		a.emit(map[string]any{"ok": true, "id": id, "action": action})
+		a.emit(map[string]any{"ok": true, "id": target.ID, "action": action})
 	} else {
-		fmt.Fprintf(a.Out, "已%s %s\n", map[string]string{"accept": "接受", "reject": "拒绝"}[action], id)
+		fmt.Fprintf(a.Out, "已%s %s\n", map[string]string{"accept": "接收", "reject": "拒收"}[action], describeTarget(target))
 	}
 	return core.ExitOK
+}
+
+// inboxListLimit 是 xlan inbox 默认显示的条数，序号也按这个范围算。
+const inboxListLimit = 20
+
+// pickTarget 把"不带参数 / 序号 / id 前缀"统一解析成具体的条目 id。
+func pickTarget(items []core.Item, arg string) (core.Item, error) {
+	arg = strings.TrimSpace(arg)
+
+	if arg == "" {
+		var pending []core.Item
+		for _, it := range items {
+			if it.Status == core.StatusPending {
+				pending = append(pending, it)
+			}
+		}
+		switch len(pending) {
+		case 0:
+			return core.Item{}, errors.New("没有待确认的传输")
+		case 1:
+			return pending[0], nil
+		default:
+			return core.Item{}, fmt.Errorf("有 %d 条待确认，用序号指定，例如：xlan inbox accept 1", len(pending))
+		}
+	}
+
+	// 1..20 之间当序号；其余当 id 前缀
+	if n, err := strconv.Atoi(arg); err == nil && n >= 1 && n <= len(items) {
+		it := items[n-1]
+		if it.Status != core.StatusPending {
+			return core.Item{}, fmt.Errorf("第 %d 条已经是 %s，不需要确认", n, it.Status)
+		}
+		return it, nil
+	}
+	for _, it := range items {
+		if it.ID == arg || strings.HasPrefix(it.ID, arg) {
+			return it, nil
+		}
+	}
+	return core.Item{}, fmt.Errorf("找不到这条记录：%s（先跑 xlan inbox 看序号）", arg)
+}
+
+// describeTarget 给人类看的一句话描述，比如"小王 发来的 报告.pdf"。
+func describeTarget(it core.Item) string {
+	who := it.FromName
+	if who == "" {
+		who = "对方"
+	}
+	if it.Kind == core.KindText {
+		return who + " 发来的消息"
+	}
+	return who + " 发来的 " + it.Name
 }
 
 // ---------- recv ----------

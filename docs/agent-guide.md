@@ -100,13 +100,22 @@
 `kind` 取值 `text` / `file` / `folder`；`status` 取值 `pending` / `active` / `done` / `failed`。
 `pending` 表示等你确认。
 
-### 2.6 `xlan inbox accept|reject <id>`
+### 2.6 `xlan inbox accept|reject [序号|id]`
 
 ```json
 {"ok":true,"id":"...","action":"accept"}
 ```
 
-只能处理 `pending` 状态的条目。
+参数三种写法：
+
+| 写法 | 含义 |
+|---|---|
+| 不写 | 恰好一条 `pending` 时自动选中；0 条或 2 条以上都会报错退出 2 |
+| `1`–`20` | 按 `xlan inbox` 输出的序号，**顺序与列表一致（新→旧）** |
+| `1793…` | 条目 id 或其前缀 |
+
+只能处理 `pending` 状态的条目，其余状态返回 2。
+agent 建议直接用完整 `id`，不要依赖序号——列表会随新消息变化。
 
 ### 2.7 `xlan recv <id> [--out 路径] [-o -]`
 
