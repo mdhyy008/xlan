@@ -5,7 +5,7 @@
 ## 0. 心智模型
 
 - 本机跑一个**常驻服务**，CLI 是它的瘦客户端。所有网络动作都由服务执行。
-- 服务不在跑时，任何命令会自动在后台拉起一个（首次调用可能多花 1–3 秒）。
+- **服务不会自动启动**：必须先 `xlan serve`。没起服务时，除 `serve` / `status` / `doctor` / `config` 之外的命令都会报 `NO_SERVICE` 并退出 1。
 - 加 `--json`，stdout 就是**一行一个 JSON 对象**（NDJSON），stderr 只有进度和日志。
   不加 `--json` 是人类可读格式，**不要解析**。
 
@@ -231,6 +231,8 @@ curl -sN http://127.0.0.1:43003/v1/events |
 
 ```bash
 xlan status --json | jq -e '.running' >/dev/null || xlan serve --detach
+sleep 1
+xlan status --json | jq -e '.running' >/dev/null || { echo "服务没起来"; exit 1; }
 xlan doctor --json
 ```
 
@@ -245,7 +247,7 @@ xlan doctor --json
 2. **公共消息的 `acked` 为空是正常现象**，不是发送失败。判断发送失败看退出码。
 3. **`send` 是阻塞的**，默认最长 60 秒。批量发请串行并自己控超时，别并发几十个。
 4. **不信任的设备会挂起**，对方不点接受就一直等到超时。要自动化就先 `xlan trust add`。
-5. **服务会自动拉起**，所以第一条命令可能比后续慢 1–3 秒；不要因此判定失败。
+5. **服务必须自己起**（`xlan serve`）。agent 想后台跑就 `xlan serve --detach`，再用 `xlan status --json` 确认 `running:true`。
 6. **传输中途改配置不会立即生效**，服务会等当前传输做完再重启（`deferred:true`）。
 7. **Windows 首次运行会弹防火墙授权**，必须允许，否则只能单向发现。
 8. **收件目录里的文件可能同名**，重名会自动变成 `报告 (1).pdf`，以 `items[].path` 为准，不要自己拼路径。

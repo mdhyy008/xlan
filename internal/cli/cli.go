@@ -165,11 +165,13 @@ func (a *App) warnf(format string, args ...any) {
 	fmt.Fprintf(a.Err, format+"\n", args...)
 }
 
-func (a *App) ensure() (string, int) {
-	ctx := context.Background()
-	base, err := spawn.Ensure(ctx, a.Cfg, a.CfgDir)
-	if err != nil {
-		return "", a.fail("SERVICE", core.ExitError, err.Error())
+// requireService 只检查服务在不在，不会偷偷拉起来。
+// 需求是：必须自己敲 xlan serve，才允许有服务在跑。
+func (a *App) requireService() (string, int) {
+	base := spawn.Find(context.Background(), a.Cfg)
+	if base == "" {
+		return "", a.fail("NO_SERVICE", core.ExitError,
+			"服务没有在运行。另开一个终端敲 `xlan serve`，它会一直在前台跑着。")
 	}
 	return base, 0
 }
@@ -185,7 +187,7 @@ func (a *App) cmdScan(args []string) int {
 	if err := a.load(); err != nil {
 		return a.fail("CONFIG", core.ExitError, err.Error())
 	}
-	base, code := a.ensure()
+	base, code := a.requireService()
 	if code != 0 {
 		return code
 	}
@@ -305,7 +307,7 @@ func (a *App) cmdText(args []string) int {
 		return a.fail("EMPTY", core.ExitUsage, "内容为空")
 	}
 
-	base, code := a.ensure()
+	base, code := a.requireService()
 	if code != 0 {
 		return code
 	}
@@ -375,7 +377,7 @@ func (a *App) cmdSend(args []string) int {
 	}
 	isDir := st.IsDir()
 
-	base, code := a.ensure()
+	base, code := a.requireService()
 	if code != 0 {
 		return code
 	}
@@ -554,7 +556,7 @@ func (a *App) cmdInbox(args []string) int {
 		return a.decide(sub, subID, *noWait)
 	}
 
-	base, code := a.ensure()
+	base, code := a.requireService()
 	if code != 0 {
 		return code
 	}
@@ -624,7 +626,7 @@ func (a *App) watchInbox(ctx context.Context, base string) int {
 }
 
 func (a *App) decide(action, arg string, noWait bool) int {
-	base, code := a.ensure()
+	base, code := a.requireService()
 	if code != 0 {
 		return code
 	}
@@ -725,7 +727,7 @@ func (a *App) cmdRecv(args []string) int {
 	if err := a.load(); err != nil {
 		return a.fail("CONFIG", core.ExitError, err.Error())
 	}
-	base, code := a.ensure()
+	base, code := a.requireService()
 	if code != 0 {
 		return code
 	}
@@ -773,7 +775,7 @@ func (a *App) cmdTrust(args []string) int {
 	if err := a.load(); err != nil {
 		return a.fail("CONFIG", core.ExitError, err.Error())
 	}
-	base, code := a.ensure()
+	base, code := a.requireService()
 	if code != 0 {
 		return code
 	}

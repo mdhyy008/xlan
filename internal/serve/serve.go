@@ -48,7 +48,11 @@ func Run(ctx context.Context, cfgDir string) error {
 
 	bus := events.New()
 
-	// 端口即锁：谁先绑上谁就是服务。
+	// 端口即锁：谁先绑上谁就是服务。已经有一个在跑就别再起。
+	if base := spawn.Find(context.Background(), cfg); base != "" {
+		fmt.Printf("xlan 服务已经在运行了：%s\n不用再起一个，直接用 xlan scan / send / text。\n", base)
+		return nil
+	}
 	var (
 		ln   net.Listener
 		port int
@@ -61,8 +65,9 @@ func Run(ctx context.Context, cfgDir string) error {
 		}
 	}
 	if ln == nil {
-		if spawn.Find(context.Background(), cfg) != "" {
-			return nil // 已有实例，静默退出
+		if base := spawn.Find(context.Background(), cfg); base != "" {
+			fmt.Printf("xlan 服务已经在运行了：%s\n不用再起一个。\n", base)
+			return nil
 		}
 		return errors.New("所有 API 端口都被占用了")
 	}
@@ -71,8 +76,9 @@ func Run(ctx context.Context, cfgDir string) error {
 	disc := discover.New(dev, port, st, bus)
 	if err := bindUDP(func() error { return disc.Listen(net.IPv4zero, core.DiscoverPort) }); err != nil {
 		ln.Close()
-		if spawn.Find(context.Background(), cfg) != "" {
-			return nil // 重启交接：旧实例还占着端口，它会负责继续服务
+		if base := spawn.Find(context.Background(), cfg); base != "" {
+			fmt.Printf("xlan 服务已经在运行了：%s\n", base)
+			return nil
 		}
 		return fmt.Errorf("绑定 UDP %d 失败: %w", core.DiscoverPort, err)
 	}
@@ -86,7 +92,8 @@ func Run(ctx context.Context, cfgDir string) error {
 		}
 		return err
 	}); err != nil {
-		if spawn.Find(context.Background(), cfg) != "" {
+		if base := spawn.Find(context.Background(), cfg); base != "" {
+			fmt.Printf("xlan 服务已经在运行了：%s\n", base)
 			return nil
 		}
 		return fmt.Errorf("绑定 UDP %d 失败: %w", core.PublicPort, err)
@@ -132,8 +139,16 @@ func Run(ctx context.Context, cfgDir string) error {
 	writeRuntime(dataDir, port, dev)
 	defer os.Remove(runtimePath(dataDir))
 
-	fmt.Printf("xlan %s 已启动\n  设备  %s (%s)\n  接口  http://0.0.0.0:%d\n  发现  udp %d / 公共文本 udp %d\n  收件  %s\n",
-		core.Version, dev.Name, dev.ID, port, core.DiscoverPort, core.PublicPort, cfg.RecvDirPath())
+	fmt.Printf("--------------- xlan 服务已启动 ---------------\n")
+	fmt.Printf("  版本   %s\n", core.VersionString())
+	fmt.Printf("  设备   %s (%s)\n", dev.Name, dev.ID)
+	fmt.Printf("  接口   http://0.0.0.0:%d\n", port)
+	fmt.Printf("  发现   udp %d\n", core.DiscoverPort)
+	fmt.Printf("  公共   udp %d\n", core.PublicPort)
+	fmt.Printf("  收件   %s\n", recvDir)
+	fmt.Printf("  数据   %s\n", dataDir)
+	fmt.Printf("--------------------------------------------\n")
+	fmt.Printf("按 Ctrl-C 停止。另开一个终端用 xlan scan / send / text。\n\n")
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- hs.Serve(ln) }()
@@ -148,6 +163,7 @@ func Run(ctx context.Context, cfgDir string) error {
 			shutdown(hs)
 			return nil
 		case <-restartCh:
+			fmt.Println("配置有变更，正在重启服务…")
 			// 先放掉所有监听端口，再拉新进程，避免新进程绑不上。
 			shutdown(hs)
 			_ = disc.Close()

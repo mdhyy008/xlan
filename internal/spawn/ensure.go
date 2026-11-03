@@ -2,7 +2,6 @@ package spawn
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -37,38 +36,6 @@ func Find(ctx context.Context, cfg *config.Config) string {
 		}
 	}
 	return ""
-}
-
-// Ensure 保证本机服务在跑，返回它的地址；不在跑就后台拉起来。
-func Ensure(ctx context.Context, cfg *config.Config, cfgDir string) (string, error) {
-	if base := Find(ctx, cfg); base != "" {
-		return base, nil
-	}
-
-	exe, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	args := []string{"serve", "--detach"}
-	if cfgDir != "" {
-		args = append(args, "--config", cfgDir)
-	}
-	cmd := exec.Command(exe, args...)
-	detach(cmd)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
-	if err := cmd.Start(); err != nil {
-		return "", err
-	}
-	_ = cmd.Process.Release()
-
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
-		if base := Find(ctx, cfg); base != "" {
-			return base, nil
-		}
-		time.Sleep(120 * time.Millisecond)
-	}
-	return "", errors.New("xlan 服务没有启动起来，试试手动跑 `xlan serve`")
 }
 
 // RestartSelf 拉起一个新的 serve 进程，用于重启自己。
