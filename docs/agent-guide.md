@@ -215,7 +215,12 @@ agent 建议直接用完整 `id`，不要依赖序号——列表会随新消息
 
 ### 2.10 `xlan doctor`
 
-网络自检，排查「扫不到设备」时用。
+```json
+{"ok":true,"selftest":true,"running":true,"checks":[{"name":"局域网","ok":true,"detail":"wlan0 192.168.1.23/24"}]}
+```
+
+会跑一次真实的自测：往本机收件目录传一块 64 KB 数据并校验，跑完删掉记录和文件。
+任何一项 `ok:false` 时退出码为 1，`detail` 里是原因。
 
 ## 3. 事件流（推荐给长驻 agent）
 

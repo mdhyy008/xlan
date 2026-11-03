@@ -73,7 +73,7 @@ xlan recv <id> -o -   # 把内容管道出去
 | `xlan recv <id> [--out 路径] [-o -]` | 取出内容，`-` 表示 stdout |
 | `xlan trust add\|rm\|list` | 信任白名单 |
 | `xlan config [get\|set\|unset]` | 查看和修改配置 |
-| `xlan doctor` | 网络自检 |
+| `xlan doctor` | 自检：网络、目录、服务、加密，并真发一个 64KB 文件验证链路 |
 
 全局参数：`--json`、`--quiet`、`--timeout 60s`、`--config 目录`。
 

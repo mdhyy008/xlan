@@ -2,7 +2,9 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -1123,46 +1126,253 @@ func (a *App) cmdTrust(args []string) int {
 
 func (a *App) cmdDoctor(args []string) int {
 	fs := a.flags("doctor")
-	fs.Parse(args)
+	if err := fs.Parse(args); err != nil {
+		return core.ExitUsage
+	}
 	if err := a.load(); err != nil {
 		return a.fail("CONFIG", core.ExitError, err.Error())
 	}
 	ctx := context.Background()
-	base := spawn.Find(ctx, a.Cfg)
-	addrs, _ := discover.BroadcastAddrs()
 
-	dir, _ := config.Dir()
-	dataDir, _ := config.DataDir()
+	checks := []doctorCheck{}
+	lan := lanInterfaces()
+
+	// ---- 网络 ----
+	private := 0
+	for _, li := range lan {
+		if li.private {
+			private++
+		}
+	}
+	if len(lan) == 0 {
+		checks = append(checks, doctorCheck{Name: "局域网", OK: false, Detail: "没有可用的网络接口（只找到 loopback）"})
+	} else if private == 0 {
+		checks = append(checks, doctorCheck{Name: "局域网", OK: true, Detail: "有网络，但没拿到私有地址，可能不在同一个局域网", Warn: true})
+	} else {
+		addrs := make([]string, 0, len(lan))
+		for _, li := range lan {
+			addrs = append(addrs, li.name+" "+li.ip+"/"+li.mask)
+		}
+		checks = append(checks, doctorCheck{Name: "局域网", OK: true, Detail: strings.Join(addrs, "，")})
+	}
+	if ips, err := discover.BroadcastAddrs(); err == nil && len(ips) > 0 {
+		ss := make([]string, 0, len(ips))
+		for _, ip := range ips {
+			ss = append(ss, ip.String())
+		}
+		checks = append(checks, doctorCheck{Name: "广播地址", OK: true, Detail: strings.Join(ss, " ")})
+	}
+
+	// ---- 目录可写 ----
+	checks = append(checks, writableCheck("收件目录", a.Cfg.RecvDirPath()))
+	checks = append(checks, writableCheck("数据目录", exeDirOrEmpty()))
+
+	// ---- 服务 ----
+	base, probeErr := spawn.FindErr(ctx, a.Cfg)
+	var info client.Info
+	if base == "" {
+		detail := "没有在运行"
+		if probeErr != nil {
+			detail = probeErr.Error()
+		}
+		checks = append(checks, doctorCheck{Name: "服务", OK: false, Detail: detail})
+	} else {
+		info, _ = client.GetInfo(ctx, base)
+		checks = append(checks, doctorCheck{Name: "服务", OK: true, Detail: fmt.Sprintf("%s（已运行 %s）", base, (time.Duration(info.UptimeSec) * time.Second).Round(time.Second))})
+		if info.TLS {
+			fp := info.Fingerprint
+			if len(fp) > 16 {
+				fp = fp[:16]
+			}
+			checks = append(checks, doctorCheck{Name: "加密", OK: true, Detail: "TLS，指纹 " + fp})
+		} else {
+			checks = append(checks, doctorCheck{Name: "加密", OK: true, Detail: "明文（未加密）", Warn: true})
+		}
+		peers, _ := client.Peers(ctx, base)
+		checks = append(checks, doctorCheck{Name: "在线设备", OK: true, Detail: fmt.Sprintf("%d 台", len(peers))})
+	}
+
+	// ---- 自测：发一个文件给自己 ----
+	selftest := false
+	if base != "" {
+		st, ok := a.doctorSelftest(ctx, base)
+		checks = append(checks, st...)
+		selftest = ok
+	}
+
+	failed := 0
+	for _, c := range checks {
+		if !c.OK {
+			failed++
+		}
+	}
 
 	if a.JSON {
 		a.emit(map[string]any{
-			"ok": true, "running": base != "", "base": base,
-			"config_dir": dir, "data_dir": dataDir, "recv_dir": a.Cfg.RecvDirPath(),
-			"ports": a.Cfg.APIPorts,
-			"broadcast": func() []string {
-				var s []string
-				for _, ip := range addrs {
-					s = append(s, ip.String())
-				}
-				return s
-			}(),
+			"ok": failed == 0, "checks": checks, "selftest": selftest,
+			"running": base != "", "base": base,
 		})
+		if failed > 0 {
+			return core.ExitError
+		}
 		return core.ExitOK
 	}
-	fmt.Fprintf(a.Out, "服务：   %s\n", orDash(base))
-	fmt.Fprintf(a.Out, "配置：   %s\n", dir)
-	fmt.Fprintf(a.Out, "数据：   %s\n", dataDir)
-	fmt.Fprintf(a.Out, "收件：   %s\n", a.Cfg.RecvDirPath())
-	fmt.Fprintf(a.Out, "端口：   %v\n", a.Cfg.APIPorts)
-	fmt.Fprint(a.Out, "广播：   ")
-	for i, ip := range addrs {
-		if i > 0 {
-			fmt.Fprint(a.Out, " ")
-		}
-		fmt.Fprint(a.Out, ip)
+
+	fmt.Fprintln(a.Out, "网络")
+	for _, c := range checks[:2] {
+		fmt.Fprintf(a.Out, "  %s %-10s %s\n", mark(c), c.Name, c.Detail)
 	}
+	fmt.Fprintln(a.Out, "\n目录")
+	for _, c := range checks[2:4] {
+		fmt.Fprintf(a.Out, "  %s %-10s %s\n", mark(c), c.Name, c.Detail)
+	}
+	fmt.Fprintln(a.Out, "\n服务")
+	rest := checks[4:]
+	for _, c := range rest {
+		fmt.Fprintf(a.Out, "  %s %-10s %s\n", mark(c), c.Name, c.Detail)
+	}
+
 	fmt.Fprintln(a.Out)
+	if failed == 0 {
+		fmt.Fprintln(a.Out, "全部通过。")
+	} else {
+		fmt.Fprintf(a.Out, "有 %d 项没通过，看上面的原因。\n", failed)
+		return core.ExitError
+	}
 	return core.ExitOK
+}
+
+type doctorCheck struct {
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail"`
+	Warn   bool   `json:"warn,omitempty"`
+}
+
+func mark(c doctorCheck) string {
+	switch {
+	case !c.OK:
+		return "✗"
+	case c.Warn:
+		return "!"
+	default:
+		return "✓"
+	}
+}
+
+func exeDirOrEmpty() string {
+	d, err := config.DataDir()
+	if err != nil {
+		return ""
+	}
+	return d
+}
+
+func writableCheck(name, dir string) doctorCheck {
+	if dir == "" {
+		return doctorCheck{Name: name, OK: false, Detail: "目录未知"}
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return doctorCheck{Name: name, OK: false, Detail: dir + " 建不出来：" + err.Error()}
+	}
+	f, err := os.CreateTemp(dir, ".doctor-*")
+	if err != nil {
+		return doctorCheck{Name: name, OK: false, Detail: dir + " 不可写：" + err.Error()}
+	}
+	p := f.Name()
+	f.Close()
+	os.Remove(p)
+	return doctorCheck{Name: name, OK: true, Detail: dir}
+}
+
+// lanInterfaces 列出可用的 IPv4 网卡地址。
+type lanIface struct {
+	name    string
+	ip      string
+	mask    string
+	private bool
+}
+
+func lanInterfaces() []lanIface {
+	var out []lanIface
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return out
+	}
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip4 := ipnet.IP.To4()
+			if ip4 == nil {
+				continue
+			}
+			ones, _ := ipnet.Mask.Size()
+			out = append(out, lanIface{
+				name: ifc.Name, ip: ip4.String(),
+				mask: strconv.Itoa(ones), private: ip4.IsPrivate(),
+			})
+		}
+	}
+	return out
+}
+
+// doctorSelftest 真的走一遍「发文件」的完整链路，然后清理干净。
+func (a *App) doctorSelftest(ctx context.Context, base string) ([]doctorCheck, bool) {
+	info, err := client.GetInfo(ctx, base)
+	if err != nil {
+		return []doctorCheck{{Name: "自测", OK: false, Detail: "拿不到服务信息：" + err.Error()}}, false
+	}
+
+	payload := make([]byte, 64*1024)
+	_, _ = rand.Read(payload)
+	sum := sha256.Sum256(payload)
+	hexSum := hex.EncodeToString(sum[:])
+
+	name := fmt.Sprintf("xlan-自测-%d.bin", time.Now().Unix())
+
+	resp, err := client.Offer(ctx, base, client.OfferReq{
+		FromID: info.ID, FromName: info.Name, ToID: info.ID,
+		Kind: "file", Name: name, Size: int64(len(payload)), SHA256: hexSum,
+	})
+	if err != nil {
+		return []doctorCheck{{Name: "自测", OK: false, Detail: "发起传输失败：" + err.Error()}}, false
+	}
+
+	// 不是自动接收模式时，自己给自己点个接受
+	if !resp.Accepted {
+		if err := client.Decision(ctx, base, resp.ID, "accept"); err != nil {
+			return []doctorCheck{{Name: "自测", OK: false, Detail: "接受传输失败：" + err.Error()}}, false
+		}
+	}
+
+	reader := bytes.NewReader(payload)
+	if err := client.PutRange(ctx, base, resp.ID, reader, 0, int64(len(payload)), int64(len(payload))); err != nil {
+		_ = client.RemoveItem(ctx, base, resp.ID, true)
+		return []doctorCheck{{Name: "自测", OK: false, Detail: "上传失败：" + err.Error()}}, false
+	}
+
+	st, err := client.GetOffer(ctx, base, resp.ID)
+	if err != nil || st.Status != string(core.StatusDone) {
+		_ = client.RemoveItem(ctx, base, resp.ID, true)
+		return []doctorCheck{{Name: "自测", OK: false, Detail: "上传后状态不是 done，校验可能没通过"}}, false
+	}
+
+	// 清理：记录和落盘的文件都删掉
+	_ = client.RemoveItem(ctx, base, resp.ID, true)
+
+	return []doctorCheck{
+		{Name: "自测", OK: true, Detail: "写了一块 64 KB 数据，走完整链路传完并校验通过，已清理"},
+	}, true
 }
 
 // ---------- helpers ----------

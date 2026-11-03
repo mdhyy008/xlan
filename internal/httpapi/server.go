@@ -295,6 +295,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/inbox", localOnly(s.handleInbox))
 	mux.HandleFunc("GET /v1/item/{id}", localOnly(s.handleGetItem))
 	mux.HandleFunc("POST /v1/inbox/clean", localOnly(s.handleClean))
+	mux.HandleFunc("DELETE /v1/item/{id}", localOnly(s.handleDeleteItem))
 	mux.HandleFunc("GET /v1/history", localOnly(s.handleHistory))
 	mux.HandleFunc("POST /v1/history", localOnly(s.handleAddHistory))
 	mux.HandleFunc("POST /v1/history/clean", localOnly(s.handleCleanHistory))
@@ -388,6 +389,34 @@ func (s *Server) handleCleanHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": n})
+}
+
+// handleDeleteItem 删掉一条记录，可选连文件一起删。
+func (s *Server) handleDeleteItem(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	it, ok, err := s.Store.GetItem(id)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
+		return
+	}
+	if !ok {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", "no such item")
+		return
+	}
+	if r.URL.Query().Get("files") == "1" && it.Path != "" {
+		root := filepath.Clean(s.RecvDir())
+		if strings.HasPrefix(filepath.Clean(it.Path), root+string(os.PathSeparator)) {
+			_ = os.RemoveAll(it.Path)
+		}
+	}
+	s.clearProgress(id)
+	s.clearRanges(id)
+	s.clear(id)
+	if err := s.Store.DeleteItem(id); err != nil {
+		writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // handleClean 按时间清掉旧记录，可选连文件一起删。

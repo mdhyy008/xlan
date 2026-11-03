@@ -43,14 +43,16 @@ func hc() *http.Client {
 func urlOf(base string) string { return secure.Rewrite(base) }
 
 type Info struct {
-	OK         bool   `json:"ok"`
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Platform   string `json:"platform"`
-	Version    string `json:"version"`
-	Port       int    `json:"port"`
-	UptimeSec  int64  `json:"uptime_sec"`
-	AutoAccept bool   `json:"auto_accept"`
+	OK          bool   `json:"ok"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Platform    string `json:"platform"`
+	Version     string `json:"version"`
+	Port        int    `json:"port"`
+	UptimeSec   int64  `json:"uptime_sec"`
+	AutoAccept  bool   `json:"auto_accept"`
+	TLS         bool   `json:"tls"`
+	Fingerprint string `json:"fingerprint"`
 }
 
 func GetInfo(ctx context.Context, base string) (Info, error) {
@@ -390,4 +392,26 @@ func CleanHistory(ctx context.Context, base string, olderThanSec int64) (int, er
 	}
 	err := postJSON(ctx, urlOf(base)+"/v1/history/clean", map[string]any{"older_than_sec": olderThanSec}, &out)
 	return out.Count, err
+}
+
+// RemoveItem 删除收件箱里的一条记录，withFiles 时连文件一起删。
+func RemoveItem(ctx context.Context, base, id string, withFiles bool) error {
+	url := fmt.Sprintf("%s/v1/item/%s", urlOf(base), id)
+	if withFiles {
+		url += "?files=1"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := hc().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("%s: %s", resp.Status, bytes.TrimSpace(b))
+	}
+	return nil
 }
