@@ -49,8 +49,8 @@ func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	accepted := false
-	if kind == core.KindText {
-		accepted = true // 小文本自动收，避免每次聊天都要确认
+	if kind == core.KindText || s.AutoAccept {
+		accepted = true // 小文本、以及自动接收模式下，都不用确认
 	} else if peer, ok, _ := s.Store.GetPeer(req.FromID); ok && peer.Trusted {
 		accepted = true
 	}

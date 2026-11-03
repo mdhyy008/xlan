@@ -18,7 +18,7 @@ func unitPath() (string, error) {
 	return filepath.Join(home, ".config", "systemd", "user", "xlan.service"), nil
 }
 
-func AutostartInstall(exe string) (string, error) {
+func AutostartInstall(exe string, autoAccept bool) (string, error) {
 	p, err := unitPath()
 	if err != nil {
 		return "", err
@@ -26,19 +26,23 @@ func AutostartInstall(exe string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return "", err
 	}
+	extra := ""
+	if autoAccept {
+		extra = " --auto-accept"
+	}
 	unit := fmt.Sprintf(`[Unit]
 Description=xlan 局域网传输服务
 After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=%s serve
+ExecStart=%s serve%s
 Restart=on-failure
 RestartSec=3
 
 [Install]
 WantedBy=default.target
-`, exe)
+`, exe, extra)
 	if err := os.WriteFile(p, []byte(unit), 0o644); err != nil {
 		return "", err
 	}

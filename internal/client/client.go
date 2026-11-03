@@ -18,13 +18,14 @@ import (
 var httpc = &http.Client{Timeout: 30 * time.Second}
 
 type Info struct {
-	OK        bool   `json:"ok"`
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Platform  string `json:"platform"`
-	Version   string `json:"version"`
-	Port      int    `json:"port"`
-	UptimeSec int64  `json:"uptime_sec"`
+	OK         bool   `json:"ok"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Platform   string `json:"platform"`
+	Version    string `json:"version"`
+	Port       int    `json:"port"`
+	UptimeSec  int64  `json:"uptime_sec"`
+	AutoAccept bool   `json:"auto_accept"`
 }
 
 func GetInfo(ctx context.Context, base string) (Info, error) {

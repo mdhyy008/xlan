@@ -18,13 +18,17 @@ func plistPath() (string, error) {
 	return filepath.Join(home, "Library", "LaunchAgents", "cn.mdhyy.xlan.plist"), nil
 }
 
-func AutostartInstall(exe string) (string, error) {
+func AutostartInstall(exe string, autoAccept bool) (string, error) {
 	p, err := plistPath()
 	if err != nil {
 		return "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return "", err
+	}
+	extra := ""
+	if autoAccept {
+		extra = "\n    <string>--auto-accept</string>"
 	}
 	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -34,13 +38,13 @@ func AutostartInstall(exe string) (string, error) {
   <key>ProgramArguments</key>
   <array>
     <string>%s</string>
-    <string>serve</string>
+    <string>serve</string>%s
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
 </dict>
 </plist>
-`, exe)
+`, exe, extra)
 	if err := os.WriteFile(p, []byte(plist), 0o644); err != nil {
 		return "", err
 	}

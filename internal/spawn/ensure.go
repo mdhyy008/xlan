@@ -40,12 +40,15 @@ func Find(ctx context.Context, cfg *config.Config) string {
 
 // Start 在后台拉起一个 serve 进程（脱离终端）。
 // 既用于 xlan serve -d，也用于服务自我重启。
-func Start(cfgDir string) error {
+func Start(cfgDir string, autoAccept bool) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
 	}
 	args := []string{"serve"}
+	if autoAccept {
+		args = append(args, "--auto-accept")
+	}
 	if cfgDir != "" {
 		args = append(args, "--config", cfgDir)
 	}

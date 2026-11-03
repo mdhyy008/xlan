@@ -31,6 +31,9 @@ type Server struct {
 	RecvDir   func() string
 	StartedAt time.Time
 
+	// AutoAccept 为真时，任何人发来的文件都直接收下，不再等确认。
+	AutoAccept bool
+
 	// Shutdown 用于让常驻服务优雅退出。
 	Shutdown func()
 	// RequestRestart 让服务重启（退出后拉起新进程）。
@@ -342,13 +345,14 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":         true,
-		"id":         s.Dev.ID,
-		"name":       s.Dev.Name,
-		"platform":   s.Dev.Platform,
-		"version":    s.Dev.Version,
-		"port":       s.Port,
-		"uptime_sec": int64(time.Since(s.StartedAt).Seconds()),
+		"ok":          true,
+		"id":          s.Dev.ID,
+		"name":        s.Dev.Name,
+		"platform":    s.Dev.Platform,
+		"version":     s.Dev.Version,
+		"port":        s.Port,
+		"uptime_sec":  int64(time.Since(s.StartedAt).Seconds()),
+		"auto_accept": s.AutoAccept,
 	})
 }
 

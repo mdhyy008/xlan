@@ -106,7 +106,7 @@ func (a *App) usage() {
   xlan stop                         停掉后台服务
   xlan autostart on|off|status      开机自启
   xlan path on|off|status           把程序目录加进 PATH
-  xlan serve [-d]                   前台跑服务，-d 放后台
+  xlan serve [-d] [--auto-accept]   前台跑服务，-d 放后台，--auto-accept 自动接收
   xlan text <内容|-> [--to 设备]     发文本，省略 --to 就是公共
   xlan send <文件|-> (--to 设备)     发文件，--all 群发，--limit 限速
   xlan inbox [-n 20] [--since 2h]   收件箱
@@ -241,20 +241,26 @@ func (a *App) cmdStatus(args []string) int {
 	base := spawn.Find(ctx, a.Cfg)
 
 	peers := []core.Peer{}
+	autoAccept := false
 	if base != "" {
 		if ps, err := client.Peers(ctx, base); err == nil {
 			peers = ps
+		}
+		if info, err := client.GetInfo(ctx, base); err == nil {
+			autoAccept = info.AutoAccept
 		}
 	}
 
 	if a.JSON {
 		a.emit(map[string]any{
 			"ok": base != "", "base": base, "running": base != "",
-			"ports": a.Cfg.APIPorts, "recv_dir": a.Cfg.RecvDirPath(), "peers": peers,
+			"ports": a.Cfg.APIPorts, "recv_dir": a.Cfg.RecvDirPath(),
+			"auto_accept": autoAccept, "peers": peers,
 		})
 		return core.ExitOK
 	}
 	fmt.Fprintf(a.Out, "服务： %s\n", orDash(base))
+	fmt.Fprintf(a.Out, "模式： %s\n", map[bool]string{true: "自动接收", false: "需要确认"}[autoAccept])
 	fmt.Fprintf(a.Out, "端口： %v\n", a.Cfg.APIPorts)
 	fmt.Fprintf(a.Out, "收件： %s\n", a.Cfg.RecvDirPath())
 	if len(peers) > 0 {
@@ -284,6 +290,7 @@ func (a *App) cmdServe(args []string) int {
 	var detach bool
 	fs.BoolVar(&detach, "detach", false, "后台运行")
 	fs.BoolVar(&detach, "d", false, "后台运行")
+	autoAccept := fs.Bool("auto-accept", false, "自动接收所有文件，不再等确认")
 	if err := fs.Parse(args); err != nil {
 		return core.ExitUsage
 	}
@@ -297,7 +304,7 @@ func (a *App) cmdServe(args []string) int {
 			fmt.Printf("xlan 服务已经在运行了：%s\n", base)
 			return core.ExitOK
 		}
-		if err := spawn.Start(a.CfgDir); err != nil {
+		if err := spawn.Start(a.CfgDir, *autoAccept); err != nil {
 			return a.fail("SPAWN", core.ExitError, err.Error())
 		}
 		deadline := time.Now().Add(10 * time.Second)
@@ -321,7 +328,7 @@ func (a *App) cmdServe(args []string) int {
 
 	runCtx, stop := signal.NotifyContext(ctx, os.Interrupt)
 	defer stop()
-	if err := serve.Run(runCtx, a.CfgDir); err != nil {
+	if err := serve.Run(runCtx, a.CfgDir, *autoAccept); err != nil {
 		return a.fail("SERVE", core.ExitError, err.Error())
 	}
 	return core.ExitOK
@@ -1552,7 +1559,7 @@ func (a *App) cmdPath(args []string) int {
 		return a.fail("EXE", core.ExitError, err.Error())
 	}
 	dir := filepath.Dir(exe)
-	on := func(string) (string, error) { return install.PathInstall(dir) }
+	on := func(string, bool) (string, error) { return install.PathInstall(dir) }
 	off := func(string) (string, error) { return install.PathRemove(dir) }
 	status := func() (bool, string, error) { return install.PathStatus(dir) }
 	return a.installCmd("path", args, on, off, status)
@@ -1560,11 +1567,12 @@ func (a *App) cmdPath(args []string) int {
 
 // installCmd 把 on/off/status 三个动作的公共流程收在一处。
 func (a *App) installCmd(name string, args []string,
-	on func(string) (string, error),
+	on func(string, bool) (string, error),
 	off func(string) (string, error),
 	status func() (bool, string, error)) int {
 
 	fs := a.flags(name)
+	autoAccept := fs.Bool("auto-accept", false, "开机自启时也自动接收")
 	rest, err := parseInterspersed(fs, args)
 	if err != nil {
 		return core.ExitUsage
@@ -1584,7 +1592,7 @@ func (a *App) installCmd(name string, args []string,
 
 	switch action {
 	case "on":
-		msg, err := on(exe)
+		msg, err := on(exe, *autoAccept)
 		if err != nil {
 			return a.fail("INSTALL", core.ExitError, err.Error())
 		}

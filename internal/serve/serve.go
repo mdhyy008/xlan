@@ -21,7 +21,7 @@ import (
 )
 
 // Run 是常驻服务的主体。所有 socket 都由它持有。
-func Run(ctx context.Context, cfgDir string) error {
+func Run(ctx context.Context, cfgDir string, autoAccept bool) error {
 	if err := config.EnsureMigrated(); err != nil {
 		return err
 	}
@@ -124,9 +124,10 @@ func Run(ctx context.Context, cfgDir string) error {
 
 	srv := &httpapi.Server{
 		Dev: dev, Port: port, Store: st, Disc: disc, Pub: pub, Bus: bus,
-		RecvDir:   func() string { return recvDir },
-		StartedAt: time.Now(),
-		Shutdown:  cancel,
+		RecvDir:    func() string { return recvDir },
+		StartedAt:  time.Now(),
+		AutoAccept: autoAccept,
+		Shutdown:   cancel,
 		RequestRestart: func() {
 			select {
 			case restartCh <- struct{}{}:
@@ -146,6 +147,9 @@ func Run(ctx context.Context, cfgDir string) error {
 	fmt.Printf("  发现   udp %d\n", core.DiscoverPort)
 	fmt.Printf("  公共   udp %d\n", core.PublicPort)
 	fmt.Printf("  收件   %s\n", recvDir)
+	if autoAccept {
+		fmt.Printf("  模式   自动接收（任何人的文件都直接收下）\n")
+	}
 	fmt.Printf("  数据   %s\n", dataDir)
 	fmt.Printf("--------------------------------------------\n")
 	fmt.Printf("按 Ctrl-C 停止。另开一个终端用 xlan scan / send / text。\n\n")
@@ -184,7 +188,7 @@ func Run(ctx context.Context, cfgDir string) error {
 			shutdown(hs)
 			_ = disc.Close()
 			_ = pub.Close()
-			_ = spawn.Start(cfgDir)
+			_ = spawn.Start(cfgDir, autoAccept)
 			return nil
 		case err := <-errCh:
 			if errors.Is(err, http.ErrServerClosed) {

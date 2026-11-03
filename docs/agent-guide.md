@@ -53,6 +53,8 @@
 
 - `xlan serve` 前台跑，占住终端，Ctrl-C 停
 - `xlan serve -d` 后台跑，命令立刻返回，适合 agent
+- `xlan serve --auto-accept` 自动接收所有人的文件，不再等确认；`/v1/info` 的 `auto_accept` 字段能看到当前状态
+- `xlan autostart on --auto-accept` 把开关一起写进开机自启定义
 - `xlan stop` 停掉，没在跑时也是退出 0
 
 服务不会自动启动，必须先起。

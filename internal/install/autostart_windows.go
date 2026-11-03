@@ -11,9 +11,13 @@ import (
 
 const runKey = `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
 
-func AutostartInstall(exe string) (string, error) {
+func AutostartInstall(exe string, autoAccept bool) (string, error) {
+	extra := ""
+	if autoAccept {
+		extra = " --auto-accept"
+	}
 	cmd := exec.Command("reg", "add", runKey, "/v", "xlan", "/t", "REG_SZ",
-		"/d", fmt.Sprintf(`"%s" serve`, exe), "/f")
+		"/d", fmt.Sprintf(`"%s" serve%s`, exe, extra), "/f")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("写入注册表失败: %v（%s）", err, string(out))
 	}

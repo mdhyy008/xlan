@@ -54,7 +54,7 @@ xlan recv <id> -o -   # 把内容管道出去
 |---|---|
 | `xlan scan [--deep]` | 发现设备；`--deep` 额外扫本机 /24 网段 |
 | `xlan status` | 服务状态、端口、在线设备 |
-| `xlan serve [-d]` | 前台跑服务，`-d` 放后台 |
+| `xlan serve [-d] [--auto-accept]` | 前台跑服务，`-d` 放后台，`--auto-accept` 自动接收所有文件 |
 | `xlan stop` | 停掉后台服务 |
 | `xlan autostart on\|off\|status` | 开机自启（Windows 注册表 / systemd / LaunchAgent） |
 | `xlan path on\|off\|status` | 把程序目录加进 PATH |
@@ -125,6 +125,7 @@ curl -N http://127.0.0.1:43003/v1/events
 - 公共文本走 UDP 广播，单包 1000 字节以内；超长自动降级为逐台 TCP 投递
 - 公共文本会等 600ms 收对方回执，零回执不等于失败，但会提示可能被 AP 隔离
 - 不信任的设备发文件会挂起，等你 `xlan inbox accept`；文本自动接收
+- `xlan serve --auto-accept` 起服务后，**任何人发来的文件都直接收下**，不再确认；开机自启用 `xlan autostart on --auto-accept` 同样生效
 - 待确认的传输保留 24 小时，但发送方只等 `--timeout`（默认 60 秒）
 - 改配置后：服务空闲就立刻重启；有传输在跑就等它们跑完再重启，不打断传输
 
