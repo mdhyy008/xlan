@@ -104,7 +104,7 @@
 - `degraded:true`：正文超过 1000 字节，已自动改为逐台 TCP 投递，此时 `acked` 是逐台投递结果
 - 私聊时 `channel:"dm"`，`acked` 是目标设备名
 
-### 2.4 `xlan send <文件|目录|-> (--to 设备 | --all)`
+### 2.4 `xlan send <文件|目录|-> (--to 设备 | --all) [--limit 5M]`
 
 发文件或整个目录。目录会先发结构清单，再逐个文件传。
 
@@ -116,6 +116,8 @@
 - 对方不信任本机时会挂起，命令阻塞等对方确认，超时退出 5
 - 对方拒绝 → 退出 4
 - 多个目标时每个目标输出一行 JSON
+- `--limit 5M` 限速，支持 `K`/`M`/`G` 后缀，省略表示不限速
+- 分块失败自动重试 3 次；并行块数由 `threads` 配置决定（默认 4）
 
 ### 2.5 `xlan inbox [-n 20] [--since 2h]`
 
@@ -215,7 +217,7 @@ curl -N http://127.0.0.1:43003/v1/events
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/v1/info` | 设备信息、端口、uptime |
+| GET | `/v1/info` | 设备信息、端口、`uptime_sec`、`auto_accept` |
 | GET | `/v1/peers` | 已知设备 |
 | POST | `/v1/scan?deep=1` | 主动扫描 |
 | GET | `/v1/inbox?limit=20&since=unix` | 收件箱 |
