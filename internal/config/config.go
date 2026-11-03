@@ -15,6 +15,7 @@ type Config struct {
 	Name     string `json:"name,omitempty"`
 	RecvDir  string `json:"recv_dir,omitempty"`
 	APIPorts []int  `json:"api_ports,omitempty"`
+	Threads  int    `json:"threads,omitempty"`
 }
 
 func Default() *Config {
@@ -22,7 +23,7 @@ func Default() *Config {
 	for i := 0; i < core.APISlots; i++ {
 		ports = append(ports, core.APIBase+i)
 	}
-	return &Config{APIPorts: ports}
+	return &Config{APIPorts: ports, Threads: 1}
 }
 
 func home() string {
@@ -151,6 +152,7 @@ func Load(dir string) (*Config, error) {
 	if len(c.APIPorts) == 0 {
 		c.APIPorts = Default().APIPorts
 	}
+	c.Threads = ClampThreads(c.Threads)
 	return c, nil
 }
 
@@ -194,4 +196,15 @@ func (c *Config) RecvDirPath() string {
 		return filepath.Join(home(), p[2:])
 	}
 	return p
+}
+
+// ClampThreads 把并发数限制在 1..8。
+func ClampThreads(n int) int {
+	if n < 1 {
+		return 1
+	}
+	if n > 8 {
+		return 8
+	}
+	return n
 }

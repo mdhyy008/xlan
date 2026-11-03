@@ -17,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"xlan/core"
@@ -570,20 +571,11 @@ func (a *App) sendOne(ctx context.Context, peer core.Peer, src string, size int6
 	bar := newProgress(a.Err, "发送 "+filepath.Base(src), size, a.showProgress())
 	defer bar.finish()
 
-	var off int64
-	for off < size {
-		n := int64(chunkSize)
-		if size-off < n {
-			n = size - off
-		}
-		if _, err := f.Seek(off, io.SeekStart); err != nil {
-			return err
-		}
-		if err := client.PutRange(ctx, base, resp.ID, io.LimitReader(f, n), off, n, size); err != nil {
-			return err
-		}
-		off += n
-		bar.update(off)
+	err = a.uploadOne(ctx, size, a.Cfg.Threads, bar.update, func(ctx context.Context, off, n int64) error {
+		return client.PutRange(ctx, base, resp.ID, io.NewSectionReader(f, off, n), off, n, size)
+	})
+	if err != nil {
+		return err
 	}
 	return nil
 }
@@ -1021,7 +1013,7 @@ func peerIDs(ps []core.Peer) string {
 }
 
 func formatItem(it core.Item) string {
-	ts := time.Unix(it.CreatedAt, 0).Format("01-02 15:04")
+	ts := time.Unix(it.CreatedAt, 0).Format("2006-01-02 15:04")
 	who := it.FromName
 	if who == "" {
 		who = it.FromID
@@ -1145,6 +1137,74 @@ func (a *App) sendFolder(ctx context.Context, peer core.Peer, root string) error
 	return client.FinishFolder(ctx, base, resp.ID)
 }
 
+// uploadOne 传一个文件。threads>1 时把文件切成块并发上传。
+func (a *App) uploadOne(ctx context.Context, size int64, threads int,
+	onChunk func(int64), put func(ctx context.Context, off, n int64) error) error {
+
+	threads = config.ClampThreads(threads)
+	if threads <= 1 {
+		var off int64
+		for off < size {
+			n := int64(chunkSize)
+			if size-off < n {
+				n = size - off
+			}
+			if err := put(ctx, off, n); err != nil {
+				return err
+			}
+			off += n
+			if onChunk != nil {
+				onChunk(off)
+			}
+		}
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		sent     int64
+		firstErr error
+	)
+	sem := make(chan struct{}, threads)
+
+	for off := int64(0); off < size; off += chunkSize {
+		n := int64(chunkSize)
+		if size-off < n {
+			n = size - off
+		}
+		wg.Add(1)
+		go func(off, n int64) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if ctx.Err() != nil {
+				return
+			}
+			if err := put(ctx, off, n); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+				cancel()
+				return
+			}
+			mu.Lock()
+			sent += n
+			if onChunk != nil {
+				onChunk(sent)
+			}
+			mu.Unlock()
+		}(off, n)
+	}
+	wg.Wait()
+	return firstErr
+}
+
 func (a *App) uploadFile(ctx context.Context, base, id, rel, src string, size int64, onChunk func(sent int64)) error {
 	f, err := os.Open(src)
 	if err != nil {
@@ -1152,24 +1212,9 @@ func (a *App) uploadFile(ctx context.Context, base, id, rel, src string, size in
 	}
 	defer f.Close()
 
-	var off int64
-	for off < size {
-		n := int64(chunkSize)
-		if size-off < n {
-			n = size - off
-		}
-		if _, err := f.Seek(off, io.SeekStart); err != nil {
-			return err
-		}
-		if err := client.PutFileRange(ctx, base, id, rel, io.LimitReader(f, n), off, n, size); err != nil {
-			return err
-		}
-		off += n
-		if onChunk != nil {
-			onChunk(off)
-		}
-	}
-	return nil
+	return a.uploadOne(ctx, size, a.Cfg.Threads, onChunk, func(ctx context.Context, off, n int64) error {
+		return client.PutFileRange(ctx, base, id, rel, io.NewSectionReader(f, off, n), off, n, size)
+	})
 }
 
 // buildManifest 遍历目录，跳过符号链接，给每个文件算好大小和校验和。
@@ -1299,7 +1344,11 @@ func (a *App) cmdConfig(args []string) int {
 		if err := a.Cfg.Save(a.CfgDir); err != nil {
 			return a.fail("SAVE", core.ExitError, err.Error())
 		}
-		outcome, inflight := a.applyByRestart()
+		// threads 只影响本机发送，服务不用重启；其余两项服务启动时读一次。
+		outcome, inflight := restartNotNeeded, int64(0)
+		if rest[1] != "threads" {
+			outcome, inflight = a.applyByRestart()
+		}
 		if a.JSON {
 			a.emit(map[string]any{
 				"ok": true, "key": rest[1], "value": val,
@@ -1315,6 +1364,8 @@ func (a *App) cmdConfig(args []string) int {
 			fmt.Fprintln(a.Out, "服务已重启，立即生效。")
 		case restartDeferred:
 			fmt.Fprintf(a.Out, "已保存。还有 %d 个传输在进行，等它们跑完自动重启。\n", inflight)
+		case restartNotNeeded:
+			fmt.Fprintln(a.Out, "已保存，立即生效。")
 		case restartNotRunning:
 			fmt.Fprintln(a.Out, "已保存，服务没在跑，下次启动时生效。")
 		default:
@@ -1332,13 +1383,14 @@ func (a *App) printConfig() {
 		a.emit(map[string]any{
 			"ok": true, "config": filepath.Join(dir, "config.json"),
 			"recv_dir": a.Cfg.RecvDirPath(), "name": a.mustValue("name"),
-			"api_ports": a.Cfg.APIPorts,
+			"api_ports": a.Cfg.APIPorts, "threads": config.ClampThreads(a.Cfg.Threads),
 		})
 		return
 	}
 	fmt.Fprintf(a.Out, "recv_dir  %s\n", a.Cfg.RecvDirPath())
 	fmt.Fprintf(a.Out, "name      %s\n", a.mustValue("name"))
 	fmt.Fprintf(a.Out, "api_ports %v\n", a.Cfg.APIPorts)
+	fmt.Fprintf(a.Out, "threads   %d\n", config.ClampThreads(a.Cfg.Threads))
 	fmt.Fprintf(a.Out, "配置      %s\n", filepath.Join(dir, "config.json"))
 }
 
@@ -1351,6 +1403,8 @@ func (a *App) configValue(key string) (string, bool) {
 			return a.Cfg.Name, true
 		}
 		return a.self().Name, true
+	case "threads":
+		return fmt.Sprintf("%d", config.ClampThreads(a.Cfg.Threads)), true
 	}
 	return "", false
 }
@@ -1366,8 +1420,14 @@ func (a *App) applyConfig(key, val string) error {
 		a.Cfg.RecvDir = val
 	case "name":
 		a.Cfg.Name = val
+	case "threads":
+		n, err := strconv.Atoi(val)
+		if err != nil {
+			return errors.New("threads 要填数字，比如 4")
+		}
+		a.Cfg.Threads = config.ClampThreads(n)
 	default:
-		return errors.New("可改的项：recv_dir、name")
+		return errors.New("可改的项：recv_dir、name、threads")
 	}
 	return nil
 }
@@ -1379,6 +1439,7 @@ const (
 	restartNow
 	restartDeferred
 	restartNotRunning
+	restartNotNeeded
 )
 
 // applyByRestart 让运行中的服务重启：空闲就立刻重启，有传输在跑就等它们跑完。

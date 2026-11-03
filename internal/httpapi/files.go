@@ -118,6 +118,9 @@ func (s *Server) handleGetOffer(w http.ResponseWriter, r *http.Request) {
 	if st, err := os.Stat(s.partPath(id)); err == nil {
 		offset = st.Size()
 	}
+	if p := s.rangePrefix(id); p > 0 {
+		offset = p
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "id": it.ID, "status": string(it.Status),
 		"accepted": it.Status == core.StatusActive || it.Status == core.StatusDone,
@@ -224,22 +227,8 @@ func (s *Server) handlePutData(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
-	cur, _ := f.Seek(0, io.SeekEnd)
-	if start > cur {
-		writeErr(w, http.StatusConflict, "GAP", fmt.Sprintf("expected offset %d, got %d", cur, start))
-		return
-	}
-	if start < cur {
-		if err := f.Truncate(start); err != nil {
-			writeErr(w, http.StatusInternalServerError, "FS", err.Error())
-			return
-		}
-	}
-	if _, err := f.Seek(start, io.SeekStart); err != nil {
-		writeErr(w, http.StatusInternalServerError, "FS", err.Error())
-		return
-	}
-	n, err := io.Copy(f, r.Body)
+	// 按偏移直接写，这样多线程可以乱序传同一个文件。
+	n, err := io.Copy(&offsetWriter{f: f, off: start}, r.Body)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "WRITE", err.Error())
 		return
@@ -248,10 +237,12 @@ func (s *Server) handlePutData(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "SHORT", "body shorter than declared range")
 		return
 	}
-	s.noteReceived(id, start+int64(n), total, end+1 >= total)
 
-	if total > 0 && end+1 < total {
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "offset": start + int64(n)})
+	covered, complete := s.markRange(id, start, end+1, total)
+	s.noteReceived(id, covered, total, complete)
+
+	if !complete {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "offset": covered})
 		return
 	}
 
@@ -263,7 +254,19 @@ func (s *Server) handlePutData(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "FINALIZE", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "offset": start + int64(n), "done": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "offset": covered, "done": true})
+}
+
+// offsetWriter 用 WriteAt 写文件，支持多个请求并发写不同偏移。
+type offsetWriter struct {
+	f   *os.File
+	off int64
+}
+
+func (w *offsetWriter) Write(p []byte) (int, error) {
+	n, err := w.f.WriteAt(p, w.off)
+	w.off += int64(n)
+	return n, err
 }
 
 var ErrChecksum = errors.New("checksum mismatch")
@@ -296,6 +299,7 @@ func (s *Server) finalize(it core.Item, part string) error {
 		Data: map[string]any{"id": it.ID, "status": string(core.StatusDone), "path": final}})
 	s.clear(it.ID)
 	s.clearProgress(it.ID)
+	s.clearRanges(it.ID)
 	s.maybeRestart()
 	return nil
 }

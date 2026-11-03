@@ -42,6 +42,9 @@ type Server struct {
 	// activity 记录每个进行中的传输最后一次动的时间，用于判断能否重启。
 	activity map[string]int64
 
+	rangeMu sync.Mutex
+	ranges  map[string]*spanSet
+
 	progMu sync.Mutex
 	// progs 记录每个传输的进度状态，用于给客户端推实时速度。
 	progs map[string]*progressState
@@ -107,6 +110,40 @@ func (s *Server) bumpCommitted(id string, n int64) {
 	if st.committed > st.received {
 		st.received = st.committed
 	}
+}
+
+// markRange 记录收到的一段字节，返回累计覆盖量和是否收齐。
+func (s *Server) markRange(id string, start, end, total int64) (int64, bool) {
+	s.rangeMu.Lock()
+	if s.ranges == nil {
+		s.ranges = make(map[string]*spanSet)
+	}
+	ss := s.ranges[id]
+	if ss == nil {
+		ss = &spanSet{}
+		s.ranges[id] = ss
+	}
+	cov := ss.add(start, end)
+	s.rangeMu.Unlock()
+
+	complete := total > 0 && cov >= total
+	return cov, complete
+}
+
+// rangePrefix 返回从 0 开始连续收到的长度。
+func (s *Server) rangePrefix(id string) int64 {
+	s.rangeMu.Lock()
+	defer s.rangeMu.Unlock()
+	if ss := s.ranges[id]; ss != nil {
+		return ss.prefix()
+	}
+	return 0
+}
+
+func (s *Server) clearRanges(id string) {
+	s.rangeMu.Lock()
+	delete(s.ranges, id)
+	s.rangeMu.Unlock()
 }
 
 // clearProgress 在传输结束时清掉状态。
