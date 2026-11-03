@@ -131,7 +131,7 @@
 `kind` 取值 `text` / `file` / `folder`；`status` 取值 `pending` / `active` / `done` / `failed`。
 `pending` 表示等你确认。
 
-### 2.5.1 `xlan ps` / `xlan pause|resume <id>`
+### 2.5.1 `xlan sends` / `xlan pause|resume <id>`
 
 ```json
 {"ok":true,"sends":[{"id":"sc8024ffe","pid":395,"started":1730000000,"target":"mbp","paths":["a.bin"],"total":1048576}]}

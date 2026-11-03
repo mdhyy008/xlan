@@ -318,7 +318,7 @@ xlan inbox cancel --all
 ```
 
 ```
-xlan ps                 看看有哪些在发
+xlan sends              看看有哪些在发
 xlan pause sc8024ffe    暂停
 xlan resume sc8024ffe   继续
 ```
@@ -422,7 +422,7 @@ xlan serve -d                      后台启动服务
 xlan serve --auto-accept           自动接收所有文件
 xlan autostart on --auto-accept    开机自启并自动接收
 xlan stop                          停掉服务
-xlan ps                            看正在发的任务
+xlan sends                         看正在发的任务
 xlan pause|resume <id>             暂停 / 继续
 xlan log                           收发记录
 xlan inbox clean --older-than 30d  清理旧记录

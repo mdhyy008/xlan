@@ -88,8 +88,8 @@ func Run(args []string) int {
 		return a.cmdConfig(rest)
 	case "log":
 		return a.cmdLog(rest)
-	case "ps":
-		return a.cmdPS(rest)
+	case "sends":
+		return a.cmdSends(rest)
 	case "pause":
 		return a.cmdSignal(rest, true)
 	case "resume":
@@ -127,7 +127,7 @@ func (a *App) usage() {
   xlan inbox clean [--older-than 30d] [--with-files]  清理旧记录
   xlan recv <id> [--out 路径] [-o -]  取出内容
   xlan trust add|rm <设备> | list   信任白名单
-  xlan ps                           正在进行的发送任务
+  xlan sends                        正在进行的发送任务
   xlan pause|resume <id>           暂停 / 继续某个发送任务
   xlan log [-n 20]                  收发记录
   xlan log clean [--older-than 30d] 清理收发记录
@@ -2034,8 +2034,8 @@ func (a *App) cmdLog(args []string) int {
 }
 
 // cmdPS 列出正在跑的发送任务。
-func (a *App) cmdPS(args []string) int {
-	fs := a.flags("ps")
+func (a *App) cmdSends(args []string) int {
+	fs := a.flags("sends")
 	if _, err := parseInterspersed(fs, args); err != nil {
 		return core.ExitUsage
 	}
@@ -2076,7 +2076,7 @@ func (a *App) cmdSignal(args []string, pause bool) int {
 	}
 	e, ok := findSend(id)
 	if !ok {
-		return a.fail("NOT_FOUND", core.ExitNoPeer, "没有这个发送任务："+id+"（用 xlan ps 看）")
+		return a.fail("NOT_FOUND", core.ExitNoPeer, "没有这个发送任务："+id+"（用 xlan sends 看）")
 	}
 	if err := signalSend(e.PID, pause); err != nil {
 		return a.fail("SIGNAL", core.ExitError, err.Error())
