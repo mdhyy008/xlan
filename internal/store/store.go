@@ -74,13 +74,17 @@ const itemCols = `id, kind, from_id, from_name, to_id, channel, body, name, size
 func scanItem(row interface{ Scan(...any) error }) (core.Item, error) {
 	var it core.Item
 	var kind, channel, status string
-	var body, name, sha, path sql.NullString
+	// 这些列历史上可能是 NULL，一律用 NullString 兜住，否则一行脏数据会让整个列表读不出来。
+	var fromID, fromName, toID, body, name, sha, path sql.NullString
 	var size sql.NullInt64
-	err := row.Scan(&it.ID, &kind, &it.FromID, &it.FromName, &it.ToID, &channel,
+	err := row.Scan(&it.ID, &kind, &fromID, &fromName, &toID, &channel,
 		&body, &name, &size, &sha, &status, &path, &it.CreatedAt)
 	if err != nil {
 		return core.Item{}, err
 	}
+	it.FromID = fromID.String
+	it.FromName = fromName.String
+	it.ToID = toID.String
 	it.Kind = core.Kind(kind)
 	it.Channel = core.Channel(channel)
 	it.Status = core.Status(status)
@@ -129,6 +133,24 @@ func (s *Store) ListItems(limit int, since int64) ([]core.Item, error) {
 		args = append(args, limit)
 	}
 	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []core.Item{}
+	for rows.Next() {
+		it, err := scanItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// ListActive 返回所有处于 active 的条目（用于清理卡死的传输）。
+func (s *Store) ListActive() ([]core.Item, error) {
+	rows, err := s.db.Query(`SELECT `+itemCols+` FROM items WHERE status = ?`, string(core.StatusActive))
 	if err != nil {
 		return nil, err
 	}

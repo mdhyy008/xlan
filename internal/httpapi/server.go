@@ -185,6 +185,45 @@ func (s *Server) clearRanges(id string) {
 	_ = s.Store.SetRanges(id, "")
 }
 
+// staleAfter 是判定"传输已经死了"的静默时长。
+const staleAfter = 5 * time.Minute
+
+// ReapStale 把长时间没有数据的 active 传输标记为失败，
+// 避免对方断线后条目一直挂着。
+func (s *Server) ReapStale() int {
+	items, err := s.Store.ListActive()
+	if err != nil {
+		return 0
+	}
+	now := time.Now().Unix()
+	n := 0
+	for _, it := range items {
+		last := it.CreatedAt
+		s.activityMu.Lock()
+		if ts, ok := s.activity[it.ID]; ok {
+			last = ts / int64(time.Second)
+		}
+		s.activityMu.Unlock()
+
+		if now-last < int64(staleAfter.Seconds()) {
+			continue
+		}
+		s.clearProgress(it.ID)
+		s.clearRanges(it.ID)
+		s.clear(it.ID)
+		if err := s.Store.UpdateItemStatus(it.ID, core.StatusFailed, it.Path); err != nil {
+			continue
+		}
+		s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: now,
+			Data: map[string]any{"id": it.ID, "status": string(core.StatusFailed), "reason": "stale"}})
+		n++
+	}
+	if n > 0 {
+		s.maybeRestart()
+	}
+	return n
+}
+
 // clearProgress 在传输结束时清掉状态。
 func (s *Server) clearProgress(id string) {
 	s.progMu.Lock()

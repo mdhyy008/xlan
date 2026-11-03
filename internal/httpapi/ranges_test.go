@@ -89,3 +89,46 @@ func TestCancelClearsProgress(t *testing.T) {
 		t.Fatalf("取消后区间应清空，得到 %d", got)
 	}
 }
+
+func TestReapStaleFailsIdleTransfers(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	now := time.Now().Unix()
+
+	// 早就开始的、没有任何活动的传输
+	old := core.Item{ID: "old", Kind: core.KindFile, FromID: "p", ToID: "self",
+		Channel: core.ChanDM, Name: "a", Size: 100, Status: core.StatusActive,
+		CreatedAt: now - 3600}
+	// 刚开始的传输
+	fresh := core.Item{ID: "fresh", Kind: core.KindFile, FromID: "p", ToID: "self",
+		Channel: core.ChanDM, Name: "b", Size: 100, Status: core.StatusActive,
+		CreatedAt: now - 10}
+	_ = s.Store.AddItem(old)
+	_ = s.Store.AddItem(fresh)
+
+	if n := s.ReapStale(); n != 1 {
+		t.Fatalf("应该只清理 1 条，实际 %d", n)
+	}
+
+	got, _, _ := s.Store.GetItem("old")
+	if got.Status != core.StatusFailed {
+		t.Fatalf("旧传输应被标记失败，实际 %s", got.Status)
+	}
+	got, _, _ = s.Store.GetItem("fresh")
+	if got.Status != core.StatusActive {
+		t.Fatalf("新传输不该被动，实际 %s", got.Status)
+	}
+}
+
+func TestReapStaleKeepsRecentlyActive(t *testing.T) {
+	s, _, _ := newTestServer(t)
+	now := time.Now().Unix()
+	it := core.Item{ID: "running", Kind: core.KindFile, FromID: "p", ToID: "self",
+		Channel: core.ChanDM, Name: "c", Size: 100, Status: core.StatusActive,
+		CreatedAt: now - 3600}
+	_ = s.Store.AddItem(it)
+	s.touch("running") // 刚刚还在传
+
+	if n := s.ReapStale(); n != 0 {
+		t.Fatalf("还在传的不该被清理，实际清理 %d", n)
+	}
+}

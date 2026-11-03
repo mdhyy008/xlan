@@ -153,6 +153,22 @@ func Run(ctx context.Context, cfgDir string) error {
 	errCh := make(chan error, 1)
 	go func() { errCh <- hs.Serve(ln) }()
 
+	// 定期清理对方断线后挂着的传输。
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-runCtx.Done():
+				return
+			case <-t.C:
+				if n := srv.ReapStale(); n > 0 {
+					fmt.Printf("清理了 %d 个长时间没有数据的传输\n", n)
+				}
+			}
+		}
+	}()
+
 	disc.Announce()
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
