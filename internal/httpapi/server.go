@@ -222,7 +222,8 @@ func (s *Server) ReapStale() int {
 			continue
 		}
 		s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: now,
-			Data: map[string]any{"id": it.ID, "status": string(core.StatusFailed), "reason": "stale"}})
+			Data: map[string]any{"id": it.ID, "status": string(core.StatusFailed),
+				"reason": "stale", "name": it.Name, "size": it.Size}})
 		n++
 	}
 	if n > 0 {

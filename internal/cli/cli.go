@@ -416,6 +416,9 @@ func (a *App) cmdStop(args []string) int {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	if base := spawn.Find(ctx, a.Cfg); base != "" {
+		return a.fail("STOP", core.ExitError, "服务还在运行（"+base+"）。可能卡住了，用 xlan serve -d 重启一次。")
+	}
 	if a.JSON {
 		a.emit(map[string]any{"ok": true, "stopped": true})
 	} else {

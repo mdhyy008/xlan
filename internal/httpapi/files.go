@@ -199,7 +199,8 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(),
-			Data: map[string]any{"id": id, "status": string(core.StatusFailed)}})
+			Data: map[string]any{"id": id, "status": string(core.StatusFailed),
+				"name": it.Name, "size": it.Size}})
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "failed"})
 		return
 	}
@@ -218,7 +219,8 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(),
-				Data: map[string]any{"id": id, "status": string(core.StatusActive)}})
+				Data: map[string]any{"id": id, "status": string(core.StatusActive),
+					"name": it.Name, "size": it.Size}})
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "active"})
 			return
 		}
@@ -227,7 +229,8 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(),
-			Data: map[string]any{"id": id, "status": string(core.StatusActive)}})
+			Data: map[string]any{"id": id, "status": string(core.StatusActive),
+				"name": it.Name, "size": it.Size}})
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "active"})
 	case "reject":
 		s.clear(id)
@@ -237,7 +240,8 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(),
-			Data: map[string]any{"id": id, "status": string(core.StatusFailed)}})
+			Data: map[string]any{"id": id, "status": string(core.StatusFailed),
+				"name": it.Name, "size": it.Size}})
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "failed"})
 	default:
 		writeErr(w, http.StatusBadRequest, "BAD_ACTION", "action must be accept or reject")
