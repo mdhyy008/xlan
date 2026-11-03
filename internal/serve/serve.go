@@ -168,7 +168,7 @@ func Run(ctx context.Context, cfgDir string) error {
 			shutdown(hs)
 			_ = disc.Close()
 			_ = pub.Close()
-			_ = spawn.RestartSelf(cfgDir)
+			_ = spawn.Start(cfgDir)
 			return nil
 		case err := <-errCh:
 			if errors.Is(err, http.ErrServerClosed) {

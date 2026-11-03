@@ -60,6 +60,8 @@ func Run(args []string) int {
 		return a.cmdStatus(rest)
 	case "serve":
 		return a.cmdServe(rest)
+	case "stop":
+		return a.cmdStop(rest)
 	case "text":
 		return a.cmdText(rest)
 	case "send":
@@ -92,7 +94,8 @@ func (a *App) usage() {
 
   xlan scan [--deep]                发现局域网设备
   xlan status                       服务状态、端口、设备
-  xlan serve [--detach]             前台跑服务
+  xlan stop                         停掉后台服务
+  xlan serve [-d]                   前台跑服务，-d 放后台
   xlan text <内容|-> [--to 设备]     发文本，省略 --to 就是公共
   xlan send <文件|-> (--to 设备)     发文件，--all 群发
   xlan inbox [-n 20] [--since 2h]   收件箱
@@ -264,19 +267,85 @@ func orDash(s string) string {
 
 func (a *App) cmdServe(args []string) int {
 	fs := a.flags("serve")
-	detach := fs.Bool("detach", false, "内部用：后台运行")
+	var detach bool
+	fs.BoolVar(&detach, "detach", false, "后台运行")
+	fs.BoolVar(&detach, "d", false, "后台运行")
 	if err := fs.Parse(args); err != nil {
 		return core.ExitUsage
 	}
 	if err := a.load(); err != nil {
 		return a.fail("CONFIG", core.ExitError, err.Error())
 	}
-	_ = detach
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx := context.Background()
+	if detach {
+		if base := spawn.Find(ctx, a.Cfg); base != "" {
+			fmt.Printf("xlan 服务已经在运行了：%s\n", base)
+			return core.ExitOK
+		}
+		if err := spawn.Start(a.CfgDir); err != nil {
+			return a.fail("SPAWN", core.ExitError, err.Error())
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			base := spawn.Find(ctx, a.Cfg)
+			if base == "" {
+				time.Sleep(150 * time.Millisecond)
+				continue
+			}
+			info, _ := client.GetInfo(ctx, base)
+			if a.JSON {
+				a.emit(map[string]any{"ok": true, "base": base, "port": info.Port, "detached": true})
+			} else {
+				fmt.Printf("xlan 服务已在后台启动：%s\n设备 %s，收件 %s\n停掉用 xlan stop。\n",
+					base, info.Name, a.Cfg.RecvDirPath())
+			}
+			return core.ExitOK
+		}
+		return a.fail("SPAWN", core.ExitError, "后台服务没有起来")
+	}
+
+	runCtx, stop := signal.NotifyContext(ctx, os.Interrupt)
 	defer stop()
-	if err := serve.Run(ctx, a.CfgDir); err != nil {
+	if err := serve.Run(runCtx, a.CfgDir); err != nil {
 		return a.fail("SERVE", core.ExitError, err.Error())
+	}
+	return core.ExitOK
+}
+
+// cmdStop 停掉在跑的服务。
+func (a *App) cmdStop(args []string) int {
+	fs := a.flags("stop")
+	if err := fs.Parse(args); err != nil {
+		return core.ExitUsage
+	}
+	if err := a.load(); err != nil {
+		return a.fail("CONFIG", core.ExitError, err.Error())
+	}
+	ctx := context.Background()
+	base := spawn.Find(ctx, a.Cfg)
+	if base == "" {
+		if a.JSON {
+			a.emit(map[string]any{"ok": true, "stopped": false})
+		} else {
+			fmt.Fprintln(a.Out, "服务本来就没在运行。")
+		}
+		return core.ExitOK
+	}
+	if err := client.Shutdown(ctx, base); err != nil {
+		return a.fail("STOP", core.ExitError, err.Error())
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if spawn.Find(ctx, a.Cfg) == "" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if a.JSON {
+		a.emit(map[string]any{"ok": true, "stopped": true})
+	} else {
+		fmt.Fprintln(a.Out, "服务已停止。")
 	}
 	return core.ExitOK
 }

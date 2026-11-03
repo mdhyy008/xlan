@@ -38,13 +38,14 @@ func Find(ctx context.Context, cfg *config.Config) string {
 	return ""
 }
 
-// RestartSelf 拉起一个新的 serve 进程，用于重启自己。
-func RestartSelf(cfgDir string) error {
+// Start 在后台拉起一个 serve 进程（脱离终端）。
+// 既用于 xlan serve -d，也用于服务自我重启。
+func Start(cfgDir string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	args := []string{"serve", "--detach"}
+	args := []string{"serve"}
 	if cfgDir != "" {
 		args = append(args, "--config", cfgDir)
 	}

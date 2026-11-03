@@ -72,6 +72,14 @@ xlan serve
 
 **这个窗口要一直开着**，关掉就等于下线了。要敲别的命令，另开一个窗口。
 
+不想一直占着窗口，就让它跑到后台去：
+
+```
+xlan serve -d
+```
+
+之后用 `xlan status` 看它在不在，用 `xlan stop` 停掉。
+
 如果忘了开服务就敲 `xlan scan`，会直接告诉你「服务没有在运行，另开一个终端敲 xlan serve」。
 
 ## 看看谁在线
@@ -247,6 +255,9 @@ xlan doctor
 ## 一页纸速查
 
 ```
+xlan serve                         前台启动服务
+xlan serve -d                      后台启动服务
+xlan stop                          停掉服务
 xlan scan                          看看谁在线
 xlan send 文件 --to 名字            发文件
 xlan send 文件夹 --to 名字          发整个文件夹
