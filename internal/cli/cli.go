@@ -459,7 +459,12 @@ func (a *App) cmdText(args []string) int {
 	}
 	resp, err := client.SendText(context.Background(), base, body, *to)
 	if err != nil {
-		return a.fail("SEND", core.ExitError, err.Error())
+		code := core.ExitError
+		name := "SEND"
+		if strings.Contains(err.Error(), "NOT_FOUND") {
+			code, name = core.ExitNoPeer, "NOT_FOUND"
+		}
+		return a.fail(name, code, err.Error())
 	}
 
 	if a.JSON {
