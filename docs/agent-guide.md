@@ -56,6 +56,16 @@
 
 服务不会自动启动，必须先起。
 
+### 2.0.1 `xlan autostart on|off|status` / `xlan path on|off|status`
+
+```json
+{"ok":true,"installed":true,"detail":"..."}
+```
+
+- `autostart`：Windows 写 HKCU 的 Run 键，Linux 装 systemd 用户服务，macOS 装 LaunchAgent
+- `path`：把可执行文件所在目录加进用户 PATH（unix 写 shell 启动文件，Windows 写用户注册表 PATH）
+- 两者都是幂等的，重复执行不会写重复内容
+
 ### 2.1 `xlan scan [--deep]`
 
 发现局域网设备。先返回缓存（立即），再刷新。

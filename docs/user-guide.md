@@ -82,6 +82,30 @@ xlan serve -d
 
 如果忘了开服务就敲 `xlan scan`，会直接告诉你「服务没有在运行，另开一个终端敲 xlan serve」。
 
+## 让它开机自己跑（可选）
+
+不想每次手动开服务：
+
+```
+xlan autostart on
+```
+
+- Windows：写进注册表的启动项，登录后自动在后台跑
+- Linux：装成 systemd 用户服务
+- macOS：装成 LaunchAgent
+
+查看状态 `xlan autostart status`，取消 `xlan autostart off`。
+
+## 让 xlan 变成全局命令（可选）
+
+如果每次都要先 `cd` 到程序目录才能用，执行一次：
+
+```
+xlan path on
+```
+
+之后重开一个命令行窗口，在任何目录都能直接敲 `xlan`。取消用 `xlan path off`。
+
 ## 看看谁在线
 
 ```
@@ -255,6 +279,8 @@ xlan doctor
 ## 一页纸速查
 
 ```
+xlan autostart on|off|status       开机自启
+xlan path on|off|status            加进 PATH
 xlan serve                         前台启动服务
 xlan serve -d                      后台启动服务
 xlan stop                          停掉服务

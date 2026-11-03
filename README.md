@@ -56,6 +56,8 @@ xlan recv <id> -o -   # 把内容管道出去
 | `xlan status` | 服务状态、端口、在线设备 |
 | `xlan serve [-d]` | 前台跑服务，`-d` 放后台 |
 | `xlan stop` | 停掉后台服务 |
+| `xlan autostart on\|off\|status` | 开机自启（Windows 注册表 / systemd / LaunchAgent） |
+| `xlan path on\|off\|status` | 把程序目录加进 PATH |
 | `xlan text <内容\|->` | 发文本，省略 `--to` 就是公共 |
 | `xlan send <文件\|目录\|->` | 发文件或目录，`--to` 指定设备，`--all` 群发 |
 | `xlan inbox` | 收件箱，默认最新 20 条 |

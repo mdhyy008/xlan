@@ -23,6 +23,7 @@ import (
 	"xlan/internal/client"
 	"xlan/internal/config"
 	"xlan/internal/discover"
+	"xlan/internal/install"
 	"xlan/internal/serve"
 	"xlan/internal/spawn"
 )
@@ -62,6 +63,10 @@ func Run(args []string) int {
 		return a.cmdServe(rest)
 	case "stop":
 		return a.cmdStop(rest)
+	case "autostart":
+		return a.cmdAutostart(rest)
+	case "path":
+		return a.cmdPath(rest)
 	case "text":
 		return a.cmdText(rest)
 	case "send":
@@ -95,6 +100,8 @@ func (a *App) usage() {
   xlan scan [--deep]                发现局域网设备
   xlan status                       服务状态、端口、设备
   xlan stop                         停掉后台服务
+  xlan autostart on|off|status      开机自启
+  xlan path on|off|status           把程序目录加进 PATH
   xlan serve [-d]                   前台跑服务，-d 放后台
   xlan text <内容|-> [--to 设备]     发文本，省略 --to 就是公共
   xlan send <文件|-> (--to 设备)     发文件，--all 群发
@@ -1406,4 +1413,87 @@ func (a *App) waitFresh(ctx context.Context) bool {
 		time.Sleep(150 * time.Millisecond)
 	}
 	return false
+}
+
+// ---------- autostart / path ----------
+
+func (a *App) cmdAutostart(args []string) int {
+	return a.installCmd("autostart", args,
+		install.AutostartInstall, install.AutostartRemove, install.AutostartStatus)
+}
+
+func (a *App) cmdPath(args []string) int {
+	exe, err := os.Executable()
+	if err != nil {
+		return a.fail("EXE", core.ExitError, err.Error())
+	}
+	dir := filepath.Dir(exe)
+	on := func(string) (string, error) { return install.PathInstall(dir) }
+	off := func(string) (string, error) { return install.PathRemove(dir) }
+	status := func() (bool, string, error) { return install.PathStatus(dir) }
+	return a.installCmd("path", args, on, off, status)
+}
+
+// installCmd 把 on/off/status 三个动作的公共流程收在一处。
+func (a *App) installCmd(name string, args []string,
+	on func(string) (string, error),
+	off func(string) (string, error),
+	status func() (bool, string, error)) int {
+
+	fs := a.flags(name)
+	rest, err := parseInterspersed(fs, args)
+	if err != nil {
+		return core.ExitUsage
+	}
+	action := "status"
+	if len(rest) > 0 {
+		action = rest[0]
+	}
+	if err := a.load(); err != nil {
+		return a.fail("CONFIG", core.ExitError, err.Error())
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return a.fail("EXE", core.ExitError, err.Error())
+	}
+
+	switch action {
+	case "on":
+		msg, err := on(exe)
+		if err != nil {
+			return a.fail("INSTALL", core.ExitError, err.Error())
+		}
+		if a.JSON {
+			a.emit(map[string]any{"ok": true, "action": "on", "msg": msg})
+		} else {
+			fmt.Fprintln(a.Out, msg)
+		}
+		return core.ExitOK
+	case "off":
+		msg, err := off(exe)
+		if err != nil {
+			return a.fail("REMOVE", core.ExitError, err.Error())
+		}
+		if a.JSON {
+			a.emit(map[string]any{"ok": true, "action": "off", "msg": msg})
+		} else {
+			fmt.Fprintln(a.Out, msg)
+		}
+		return core.ExitOK
+	case "status":
+		installed, detail, err := status()
+		if err != nil {
+			return a.fail("STATUS", core.ExitError, err.Error())
+		}
+		if a.JSON {
+			a.emit(map[string]any{"ok": true, "installed": installed, "detail": detail})
+		} else if installed {
+			fmt.Fprintln(a.Out, "已设置："+detail)
+		} else {
+			fmt.Fprintln(a.Out, "未设置")
+		}
+		return core.ExitOK
+	}
+	return a.fail("USAGE", core.ExitUsage, "用法：xlan "+name+" on|off|status")
 }
