@@ -23,7 +23,7 @@ func Default() *Config {
 	for i := 0; i < core.APISlots; i++ {
 		ports = append(ports, core.APIBase+i)
 	}
-	return &Config{APIPorts: ports, Threads: 1}
+	return &Config{APIPorts: ports, Threads: DefaultThreads}
 }
 
 func home() string {
@@ -198,13 +198,19 @@ func (c *Config) RecvDirPath() string {
 	return p
 }
 
-// ClampThreads 把并发数限制在 1..8。
+// DefaultThreads 是默认的并行分块数。
+const DefaultThreads = 4
+
+// MaxThreads 是允许的最大并发数。
+const MaxThreads = 8
+
+// ClampThreads 把并发数限制在 1..MaxThreads；没设过（0 或负数）用默认值。
 func ClampThreads(n int) int {
-	if n < 1 {
-		return 1
+	if n <= 0 {
+		return DefaultThreads
 	}
-	if n > 8 {
-		return 8
+	if n > MaxThreads {
+		return MaxThreads
 	}
 	return n
 }

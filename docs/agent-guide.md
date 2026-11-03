@@ -165,7 +165,7 @@ agent 建议直接用完整 `id`，不要依赖序号——列表会随新消息
 |---|---|---|
 | `recv_dir` | 收件目录 | 是（空闲时立即，有传输时等传完） |
 | `name` | 本机显示名 | 是 |
-| `threads` | 发送时并行分块数，1–8，默认 1 | 否，改完立刻生效 |
+| `threads` | 发送时并行分块数，1–8，默认 4 | 否，改完立刻生效 |
 
 ```json
 {"ok":true,"key":"recv_dir","value":"/data/xlan","restarted":true,"deferred":false,"inflight":0}

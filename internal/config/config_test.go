@@ -50,3 +50,18 @@ func TestRecvDirPath(t *testing.T) {
 		t.Fatalf("tilde not expanded: %s", c.RecvDirPath())
 	}
 }
+
+func TestClampThreads(t *testing.T) {
+	cases := map[int]int{-3: DefaultThreads, 0: DefaultThreads, 1: 1, 4: 4, MaxThreads: MaxThreads, 99: MaxThreads}
+	for in, want := range cases {
+		if got := ClampThreads(in); got != want {
+			t.Errorf("ClampThreads(%d) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+func TestDefaultThreads(t *testing.T) {
+	if got := Default().Threads; got != DefaultThreads {
+		t.Fatalf("默认并发数应为 %d，实际 %d", DefaultThreads, got)
+	}
+}
