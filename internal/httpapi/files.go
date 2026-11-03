@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"xlan/core"
 	"xlan/internal/client"
@@ -420,7 +421,16 @@ func sanitizeName(name string) string {
 		if len(ext) > 20 {
 			ext = ""
 		}
-		name = name[:200-len(ext)] + ext
+		base := strings.TrimSuffix(name, ext)
+		limit := 200 - len(ext)
+		var b strings.Builder
+		for _, r := range base {
+			if b.Len()+utf8.RuneLen(r) > limit {
+				break
+			}
+			b.WriteRune(r)
+		}
+		name = b.String() + ext
 	}
 	return name
 }

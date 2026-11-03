@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -26,6 +27,14 @@ func safeJoin(root, rel string) (string, error) {
 	if clean == "." || clean == ".." || filepath.IsAbs(clean) ||
 		strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
 		return "", fmt.Errorf("unsafe path: %q", rel)
+	}
+	// Windows 上把非法字符和设备名换掉，否则可能写到设备节点里。
+	if runtime.GOOS == "windows" {
+		parts := strings.Split(filepath.ToSlash(clean), "/")
+		for i, p := range parts {
+			parts[i] = sanitizeName(p)
+		}
+		clean = filepath.FromSlash(strings.Join(parts, "/"))
 	}
 	dest := filepath.Join(root, clean)
 	base := filepath.Clean(root) + string(os.PathSeparator)
