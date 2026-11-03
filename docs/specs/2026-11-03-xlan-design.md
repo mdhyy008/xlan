@@ -1,6 +1,6 @@
 # xlan 设计文档
 
-版本 0.1 · 2026-11-03
+版本 0.2 · 2026-11-03
 
 ## 1. 目标
 
@@ -15,8 +15,11 @@
 ## 2. 非目标（第一版）
 
 - 跨网中继、NAT 穿透
-- 目录双向同步
-- TUI 界面
+- 目录双向同步、目录递归传输
+- TUI 界面（交互只用一个数字菜单）
+- 系统桌面通知
+- mDNS（留 `Provider` 接口，1.1 再插）
+- TLS
 - gomobile 壳（只保证 `core/` 不被写死成「只能当命令行用」）
 
 ## 3. 命名与路径
@@ -24,7 +27,9 @@
 - 命令：`xlan`
 - Linux/macOS：配置 `~/.config/xlan`，数据 `~/.local/share/xlan`，缓存 `~/.cache/xlan`
 - Windows：`%APPDATA%\xlan`、`%LOCALAPPDATA%\xlan`
-- 所有运行时文件（锁、日志、`.part`）都在上述目录，不写系统临时目录
+- 数据库：`<数据目录>/xlan.db`
+- 收件目录：默认 `~/Downloads/xlan`，配置可改
+- 所有运行时文件都在上述目录，不写系统临时目录
 
 ## 4. 端口
 
@@ -36,34 +41,44 @@ TCP 与 UDP 的端口空间互相独立，可同号复用。
 | 43002 | UDP | 公共文本广播 + 回执 | 固定 |
 | 43003 | TCP | HTTP API（首选） | 占用时依次 43004、43005 |
 
-- TCP 实际端口写入锁文件，并放进 announce 包与 `/v1/info`，对方以此为准
+- TCP 实际端口写进 `runtime.json`，并放进 announce 包与 `/v1/info`
 - 不要求两端端口一致
 - 只有常驻服务持有这些 socket，CLI 不直接绑定端口
 
 ## 5. 命令面
 
 ```
-xlan scan                        发现局域网设备（先出缓存，再刷新）
+xlan scan                        发现局域网设备
 xlan serve [--foreground]        前台跑服务
-xlan send <路径> [--to 名字]      发文件，省略 --to = 群发
+xlan send <路径> --to 名字        发文件
+xlan send <路径> --all            群发文件
 xlan text "内容" [--to 名字]      发文本，省略 --to = 公共
-xlan inbox [--watch]             收件箱：文本、文件、待确认
-xlan status                      本机服务状态、在线设备、端口
+xlan inbox [-n 20] [--since 2h]  收件箱，默认最新 20 条
+xlan inbox --watch               实时跟随新消息
+xlan inbox accept|reject <id>    处理待确认的传输
+xlan recv <id> [--out 路径] [-o -]  把收件箱某项取到文件或 stdout
+xlan status                      服务状态、端口、在线设备
 xlan trust add|rm|list           信任白名单
 xlan doctor                      网络自检（端口、广播、防火墙）
 ```
 
-全局参数：`--json`、`--quiet`、`--timeout`、`--config`、`--port`、`--as 名字`。
+全局参数：`--json`、`--quiet`、`--timeout`、`--config`、`--as 名字`。
 
-管道语义（CLI 最有价值的部分）：
+管道语义：
 
-- `cat a.zip | xlan send -`：从 stdin 流式发送
+- `cat a.zip | xlan send - --to mbp`：从 stdin 流式发送
 - `git log | xlan text -`：从 stdin 读文本
-- `xlan recv <id> -o -`：输出到 stdout，可接 `| tar x`
+- `xlan recv 7 -o - | tar x`：输出到 stdout
+
+**目标选择规则**
+
+- `send`：0 台在线 → 报错，退出码 3；1 台 → 直接发；多台 → 终端里弹数字菜单选择，`--all` 群发
+- 非 TTY（管道、脚本、`--json`）时**不交互**，多台直接报错，退出码 2，并列出候选
+- `--to` 支持设备名（大小写不敏感、前缀匹配）或设备 id 前缀；歧义时报错并列出候选 id
 
 ## 6. 网络协议
 
-**原则：所有网络动作由常驻服务执行，CLI 只是瘦客户端。** 避免两个命令同时抢同一个端口，也避免状态分裂。
+**原则：所有网络动作由常驻服务执行，CLI 只是瘦客户端。** 避免两个命令抢同一个端口，也避免状态分裂。
 
 ### 6.1 发现（UDP 43001）
 
@@ -76,65 +91,74 @@ xlan doctor                      网络自检（端口、广播、防火墙）
 
 - 服务启动、以及每 30 秒发一次 `announce`
 - `xlan scan` 触发 `probe`，收到的人单播回 `announce`
-- 广播同时发 `255.255.255.255` 和每个活动网卡的定向广播地址（如 `192.168.1.255`），因为部分系统/路由只认其中一种
-- 结果写入 `peers.json`，TTL 5 分钟；`scan` 先立即输出缓存，再后台刷新
-- 三层兜底：mDNS（`_xlan._tcp`）→ UDP 广播 → 子网 TCP 并发探测（受限网络、安卓 Termux 下只有第三层能用）
+- 广播同时发 `255.255.255.255` 和每个活动网卡的定向广播地址（如 `192.168.1.255`）
+- 结果写库，`scan` 先立即输出缓存，再刷新
+- 两层兜底：UDP 广播 → 子网 TCP 并发探测（受限网络、安卓 Termux 下只有第二层能用）
+- 发现层定义 `Provider` 接口，mDNS 在 1.1 作为第三个实现插入
 
 ### 6.2 公共文本（UDP 43002）
-
-包格式：
 
 ```json
 {"v":1,"t":"msg","id":"<msgid>","sid":"<发送者id>","sname":"...","channel":"public","body":"...","ts":1730000000}
 {"v":1,"t":"ack","id":"<msgid>","rid":"<接收者id>","rname":"..."}
 ```
 
-- 正文上限 **1000 字节**（UTF-8，按 rune 边界截断判断），整包控制在 1200 字节内
+- 正文上限 **1000 字节**，整包控制在 1200 字节内
 - 发送方连发 2 遍，间隔 30ms
 - 接收方按 `msgid` 去重，收到后单播回 `ack` 到源地址:43002
-- 发送方等 600ms 收集回执，输出 `{"ok":true,"acked":["peer-a","peer-b"]}`
-- 零回执时降级为警告：`{"ok":true,"acked":[],"warn":"no_ack"}`，退出码仍为 0（消息确实发出去了），但 stderr 提示可能被 AP 过滤，建议 `xlan doctor`
-- **正文超过 1000 字节自动降级**：改为对所有在线设备逐一走 TCP 投递，`channel` 仍标 `public`，调用方无感
+- 发送方等 600ms 收集回执，输出 `{"ok":true,"acked":["peer-a"]}`
+- 零回执不报错（消息确实发出去了），但 stderr 提示可能被 AP 过滤，建议 `xlan doctor`
+- **正文超过 1000 字节自动降级**：改为对所有在线设备逐一走 TCP 投递，`channel` 仍标 `public`
 
 ### 6.3 私聊文本与文件（TCP）
 
 ```
-GET  /v1/info                    设备名、id、平台、能力、服务端口、指纹
+GET  /v1/info                    设备名、id、平台、能力、服务端口
 POST /v1/offer                   发起传输（文件或文本），返回 offer_id
 GET  /v1/offer/{id}              状态、已接收 offset（续传用）
-PUT  /v1/offer/{id}/data         流式上传，支持 Content-Range
+PUT  /v1/offer/{id}/data         流式上传，Content-Range 定位
 POST /v1/offer/{id}/decision     accept / reject
-GET  /v1/inbox                   JSON 列表
+GET  /v1/inbox                   JSON 列表（limit / since）
 GET  /v1/events                  SSE 事件流
 ```
 
-`/v1/events` 是真正的复用接口：其他程序不必解析 CLI 输出，直接订阅即可。这比 `--json` 更重要。
+`/v1/events` 是真正的复用接口：其他程序不必解析 CLI 输出，直接订阅即可。
 
-本地管理端点（`/v1/scan`、`/v1/text` 的广播分支、`/v1/inbox` 写操作）**只接受来自 127.0.0.1 / ::1 的连接**，防止局域网内被别人当跳板。
+本地管理端点（`/v1/scan`、`/v1/text` 的广播分支、`/v1/inbox` 写操作）**只接受来自 127.0.0.1 / ::1 的连接**。
 
 ## 7. 数据模型
 
-```
-Peer   { id, name, addr, port, platform, last_seen, trusted, fingerprint }
-Item   { id, kind: text|file, from, to, channel: dm|public, size, sha256,
-         status: pending|active|done|failed, path, created_at, thread }
-Offer  { id, item_id, from, to, filename, size, sha256, offset, expires_at }
+SQLite（`modernc.org/sqlite`，纯 Go，可交叉编译）。
+
+```sql
+items(id TEXT PK, kind TEXT, from_id TEXT, from_name TEXT, to_id TEXT,
+      channel TEXT, body TEXT, name TEXT, size INTEGER, sha256 TEXT,
+      status TEXT, path TEXT, created_at INTEGER)
+peers(id TEXT PK, name TEXT, addr TEXT, port INTEGER, platform TEXT,
+      last_seen INTEGER, trusted INTEGER)
 ```
 
-私聊的 `to` 是 peer id，公共的 `to` 为 `"*"`，两者走同一套 Item 结构。线程键：私聊为 `(peerA, peerB)`，公共为 `*`。
+- `kind`：`text` / `file`；`channel`：`dm` / `public`；`status`：`pending` / `active` / `done` / `failed` / `expired`
+- 公共消息的 `to_id` 为 `"*"`
+- 不设保留上限，`inbox` 默认只查最新 20 条
+- 数据库只存元数据；文件本体在收件目录
 
 ## 8. 服务生命周期
 
-- 锁文件 `serve.lock` 存 PID + 实际端口，`flock` 加锁（Windows 用 `LockFileEx`）
-- 任何命令先 `ensureServe()`：锁在、进程活着、`/v1/info` 能通 → 复用；否则 spawn 一个 `xlan serve --detach`
-- 平台差异：Unix 用 `Setsid`，Windows 用 `DETACHED_PROCESS | CREATE_NO_WINDOW`
-- `xlan status` 能看出服务是否在跑、端口、监听地址
+**监听端口本身就是锁**，不用文件锁、不用 PID 校验：
+
+- `serve` 依次尝试绑定 43003、43004、43005，第一个成功的端口即本机端口
+- 全部绑定失败 → 检查 43003 的健康状况，能通就说明已有实例在跑，静默退出 0
+- 任何 CLI 命令先 `Ensure()`：逐个端口试 `/v1/info`，有活的就复用；否则 spawn 一个 `xlan serve --detach`
+- 平台差异：Unix `Setsid`，Windows `DETACHED_PROCESS | CREATE_NO_WINDOW`
+- UDP 43001/43002 只能被一个进程绑定，天然互斥
 
 ## 9. 信任与收件箱
 
-- 收到 offer 先查白名单：信任的直接落盘
-- 不信任的挂起为 pending，发系统通知，`xlan inbox` 里可见，60 秒内未处理即进收件箱排队
-- 收件箱是唯一的人工确认入口，第一版不做交互 TUI
+- 收到 offer 先查白名单：信任的直接开传
+- 不信任的挂起为 `pending`，24 小时内有效，`xlan inbox` 里可见
+- 发送方只等 `--timeout`（默认 60 秒），超时退出码 5；此时对方的 offer 仍在收件箱挂着，但标记「发送方已离开」，再 accept 也无法传输
+- 不做系统通知，靠 `xlan inbox --watch` 实时看
 - `xlan trust add <peer-id>` 之后免确认
 
 ## 10. 输出契约
@@ -143,7 +167,7 @@ Offer  { id, item_id, from, to, filename, size, sha256, offset, expires_at }
 - **stderr 只出进度与日志**
 - 退出码：`0` 成功 / `1` 一般错误 / `2` 用法错误 / `3` 找不到设备 / `4` 被拒绝 / `5` 超时 / `6` 校验失败
 - `--json` 时错误也写 stdout：`{"ok":false,"code":"NOT_FOUND","msg":"..."}`
-- 同一份 JSON 结构同时用于 CLI 输出和 SSE 事件，调用方只需实现一套解析
+- 同一份 JSON 结构同时用于 CLI 输出和 SSE 事件
 
 ## 11. 可靠性
 
@@ -151,13 +175,14 @@ Offer  { id, item_id, from, to, filename, size, sha256, offset, expires_at }
 - 接收：写 `.part`，完成后校验 sha256，再原子 `rename`
 - 发送：1MB 分块，失败重试 3 次，指数退避
 - 续传：`GET /v1/offer/{id}` 返回 `offset`，从该处继续
-- 传输中断超过 10 分钟的任务标记 failed，`.part` 保留 24 小时
+- 重名落盘时自动加 ` (1)`、` (2)`，**绝不覆盖**
+- 传输中断超过 10 分钟标记 failed，`.part` 保留 24 小时
 
 ## 12. 安全
 
-- 第一版 HTTP 明文，仅限可信内网；`--tls` 留到 1.1（自签 + 指纹确认）
-- 接收端必须防路径穿越：拒绝绝对路径、`..`、Windows 保留名，文件名清洗后落盘
-- 单文件大小上限默认 4GB（可配置），文本上限见 6.2
+- 第一版 HTTP 明文，仅限可信内网
+- 接收端防路径穿越：拒绝绝对路径、`..`、Windows 保留名，文件名清洗后落盘
+- 单文件大小上限默认 4GB（可配置）
 - 本地管理接口绑定回环
 
 ## 13. 仓库结构
@@ -166,22 +191,25 @@ Offer  { id, item_id, from, to, filename, size, sha256, offset, expires_at }
 Go/xlan/
   cmd/xlan/main.go
   core/                  公开包：纯逻辑，不碰 os.Args / stdout / os.Exit / 全局状态
-    peer.go item.go offer.go session.go events.go
-  internal/cli/          子命令、输出格式
-  internal/discover/     udp broadcast、mdns、tcp probe
-  internal/httpapi/      路由、handler
-  internal/store/        peers.json、inbox、config
-  internal/spawn/        锁与自拉起（分平台 build tag）
-  internal/platform/     路径、通知、文件锁
-  docs/specs/
+    ports.go wire.go peer.go item.go event.go device.go
+  internal/config/       路径与配置
+  internal/store/        SQLite
+  internal/events/       进程内事件总线
+  internal/discover/     UDP 广播、TCP 探测
+  internal/pubtext/      公共文本广播与回执
+  internal/httpapi/      HTTP 服务与 handler
+  internal/client/       面向对端设备的 HTTP 客户端
+  internal/spawn/        自拉起（分平台 detach）
+  internal/cli/          子命令、输出格式、交互选择
+  docs/
 ```
 
-`core/` 放在顶层而非 `internal/`，因为以后 `gomobile bind` 不能绑定 internal 包。
+`core/` 放顶层而非 `internal/`，因为以后 `gomobile bind` 不能绑定 internal 包。
 
 ## 14. 里程碑
 
 1. **M1 骨架**：`scan` + `serve` + `/v1/info`，UDP 广播发现跑通
-2. **M2 文本**：公共文本（UDP 广播 + 回执 + 降级）、私聊文本（TCP）
+2. **M2 文本**：公共文本（广播 + 回执 + 降级）、私聊文本
 3. **M3 文件**：单文件传输、进度、sha256 校验、原子落盘
 4. **M4 体验**：收件箱、信任白名单、断点续传、`doctor`
-5. **M5 契约固化**：`--json` 全量、SSE 事件流、退出码、README 示例
+5. **M5 固化**：`--json` 全量、SSE、退出码、README

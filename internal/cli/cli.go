@@ -1,0 +1,927 @@
+package cli
+
+import (
+	"bufio"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"xlan/core"
+	"xlan/internal/client"
+	"xlan/internal/config"
+	"xlan/internal/discover"
+	"xlan/internal/serve"
+	"xlan/internal/spawn"
+)
+
+const chunkSize = 4 << 20
+
+// App 保存一次命令调用的全局状态。
+type App struct {
+	Cfg     *config.Config
+	CfgDir  string
+	JSON    bool
+	Quiet   bool
+	Timeout time.Duration
+	Out     io.Writer
+	Err     io.Writer
+
+	// Dev 缓存本机身份；测试里可直接注入。
+	Dev core.Device
+}
+
+// Run 是 CLI 的入口，返回进程退出码。
+func Run(args []string) int {
+	a := &App{Out: os.Stdout, Err: os.Stderr, Timeout: 60 * time.Second}
+	if len(args) == 0 {
+		a.usage()
+		return core.ExitOK
+	}
+	cmd, rest := args[0], args[1:]
+
+	switch cmd {
+	case "scan":
+		return a.cmdScan(rest)
+	case "status":
+		return a.cmdStatus(rest)
+	case "serve":
+		return a.cmdServe(rest)
+	case "text":
+		return a.cmdText(rest)
+	case "send":
+		return a.cmdSend(rest)
+	case "inbox":
+		return a.cmdInbox(rest)
+	case "recv":
+		return a.cmdRecv(rest)
+	case "trust":
+		return a.cmdTrust(rest)
+	case "doctor":
+		return a.cmdDoctor(rest)
+	case "help", "-h", "--help":
+		a.usage()
+		return core.ExitOK
+	case "version", "--version":
+		fmt.Fprintf(a.Out, "xlan %s\n", core.Version)
+		return core.ExitOK
+	}
+
+	fmt.Fprintf(a.Err, "xlan: 未知命令 %q\n\n", cmd)
+	a.usage()
+	return core.ExitUsage
+}
+
+func (a *App) usage() {
+	fmt.Fprint(a.Out, `xlan — 局域网传输
+
+  xlan scan [--deep]                发现局域网设备
+  xlan status                       服务状态、端口、设备
+  xlan serve [--detach]             前台跑服务
+  xlan text <内容|-> [--to 设备]     发文本，省略 --to 就是公共
+  xlan send <文件|-> (--to 设备)     发文件，--all 群发
+  xlan inbox [-n 20] [--since 2h]   收件箱
+  xlan inbox --watch                实时跟随
+  xlan inbox accept|reject <id>     处理待确认的传输
+  xlan recv <id> [--out 路径] [-o -]  取出内容
+  xlan trust add|rm <设备> | list   信任白名单
+  xlan doctor                       网络自检
+
+全局参数：--json --quiet --timeout 60s --config 目录
+`)
+}
+
+func (a *App) flags(name string) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(a.Err)
+	fs.BoolVar(&a.JSON, "json", false, "输出 NDJSON")
+	fs.BoolVar(&a.Quiet, "quiet", false, "不打印进度")
+	fs.DurationVar(&a.Timeout, "timeout", 60*time.Second, "等待超时")
+	fs.StringVar(&a.CfgDir, "config", "", "配置目录")
+	return fs
+}
+
+// parseInterspersed 允许参数和选项混着写，例如 `xlan text hi --json`。
+func parseInterspersed(fs *flag.FlagSet, args []string) ([]string, error) {
+	var rest []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		if fs.NArg() == 0 {
+			return rest, nil
+		}
+		rest = append(rest, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
+}
+
+func (a *App) load() error {
+	cfg, err := config.Load(a.CfgDir)
+	if err != nil {
+		return err
+	}
+	a.Cfg = cfg
+	return nil
+}
+
+func (a *App) emit(v any) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	fmt.Fprintln(a.Out, string(b))
+}
+
+func (a *App) fail(code string, exit int, msg string) int {
+	if a.JSON {
+		a.emit(map[string]any{"ok": false, "code": code, "msg": msg})
+	} else {
+		fmt.Fprintf(a.Err, "xlan: %s\n", msg)
+	}
+	return exit
+}
+
+func (a *App) warnf(format string, args ...any) {
+	if a.Quiet {
+		return
+	}
+	fmt.Fprintf(a.Err, format+"\n", args...)
+}
+
+func (a *App) ensure() (string, int) {
+	ctx := context.Background()
+	base, err := spawn.Ensure(ctx, a.Cfg, a.CfgDir)
+	if err != nil {
+		return "", a.fail("SERVICE", core.ExitError, err.Error())
+	}
+	return base, 0
+}
+
+// ---------- scan ----------
+
+func (a *App) cmdScan(args []string) int {
+	fs := a.flags("scan")
+	deep := fs.Bool("deep", false, "同时扫描本机 /24 网段")
+	if err := fs.Parse(args); err != nil {
+		return core.ExitUsage
+	}
+	if err := a.load(); err != nil {
+		return a.fail("CONFIG", core.ExitError, err.Error())
+	}
+	base, code := a.ensure()
+	if code != 0 {
+		return code
+	}
+	peers, err := client.Scan(context.Background(), base, *deep)
+	if err != nil {
+		return a.fail("SCAN", core.ExitError, err.Error())
+	}
+	if a.JSON {
+		a.emit(map[string]any{"ok": true, "peers": peers})
+		return core.ExitOK
+	}
+	if len(peers) == 0 {
+		fmt.Fprintln(a.Out, "没发现设备。换个网段或加 --deep 再试。")
+		return core.ExitOK
+	}
+	fmt.Fprintf(a.Out, "%-20s %-10s %-16s %s\n", "名称", "平台", "地址", "id")
+	for _, p := range peers {
+		fmt.Fprintf(a.Out, "%-20s %-10s %-16s %s\n", p.Name, p.Platform, p.Addr, p.ID)
+	}
+	return core.ExitOK
+}
+
+// ---------- status ----------
+
+func (a *App) cmdStatus(args []string) int {
+	fs := a.flags("status")
+	if err := fs.Parse(args); err != nil {
+		return core.ExitUsage
+	}
+	if err := a.load(); err != nil {
+		return a.fail("CONFIG", core.ExitError, err.Error())
+	}
+	ctx := context.Background()
+	base := spawn.Find(ctx, a.Cfg)
+
+	peers := []core.Peer{}
+	if base != "" {
+		if ps, err := client.Peers(ctx, base); err == nil {
+			peers = ps
+		}
+	}
+
+	if a.JSON {
+		a.emit(map[string]any{
+			"ok": base != "", "base": base, "running": base != "",
+			"ports": a.Cfg.APIPorts, "recv_dir": a.Cfg.RecvDirPath(), "peers": peers,
+		})
+		return core.ExitOK
+	}
+	fmt.Fprintf(a.Out, "服务： %s\n", orDash(base))
+	fmt.Fprintf(a.Out, "端口： %v\n", a.Cfg.APIPorts)
+	fmt.Fprintf(a.Out, "收件： %s\n", a.Cfg.RecvDirPath())
+	if len(peers) > 0 {
+		fmt.Fprintf(a.Out, "设备： %d 台\n", len(peers))
+		for _, p := range peers {
+			mark := " "
+			if p.Trusted {
+				mark = "*"
+			}
+			fmt.Fprintf(a.Out, "  %s %-18s %-16s %s\n", mark, p.Name, p.Addr, p.ID)
+		}
+	}
+	return core.ExitOK
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "没有在跑"
+	}
+	return s
+}
+
+// ---------- serve ----------
+
+func (a *App) cmdServe(args []string) int {
+	fs := a.flags("serve")
+	detach := fs.Bool("detach", false, "内部用：后台运行")
+	if err := fs.Parse(args); err != nil {
+		return core.ExitUsage
+	}
+	if err := a.load(); err != nil {
+		return a.fail("CONFIG", core.ExitError, err.Error())
+	}
+	_ = detach
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	if err := serve.Run(ctx, a.CfgDir); err != nil {
+		return a.fail("SERVE", core.ExitError, err.Error())
+	}
+	return core.ExitOK
+}
+
+// ---------- text ----------
+
+func (a *App) cmdText(args []string) int {
+	fs := a.flags("text")
+	to := fs.String("to", "", "目标设备")
+	rest, err := parseInterspersed(fs, args)
+	if err != nil {
+		return core.ExitUsage
+	}
+	if err := a.load(); err != nil {
+		return a.fail("CONFIG", core.ExitError, err.Error())
+	}
+
+	body := strings.Join(rest, " ")
+	if body == "-" || (body == "" && !isTTY()) {
+		b, err := io.ReadAll(io.LimitReader(os.Stdin, 10<<20))
+		if err != nil {
+			return a.fail("STDIN", core.ExitError, err.Error())
+		}
+		body = string(b)
+	}
+	body = strings.TrimRight(body, "\n")
+	if strings.TrimSpace(body) == "" {
+		return a.fail("EMPTY", core.ExitUsage, "内容为空")
+	}
+
+	base, code := a.ensure()
+	if code != 0 {
+		return code
+	}
+	resp, err := client.SendText(context.Background(), base, body, *to)
+	if err != nil {
+		return a.fail("SEND", core.ExitError, err.Error())
+	}
+
+	if a.JSON {
+		a.emit(map[string]any{"ok": true, "channel": resp.Channel, "acked": resp.Acked,
+			"degraded": resp.Degraded, "warn": resp.Warn})
+		return core.ExitOK
+	}
+	if resp.Degraded {
+		fmt.Fprintf(a.Out, "已逐台投递到 %d 台设备\n", len(resp.Acked))
+		return core.ExitOK
+	}
+	if resp.Channel == "public" {
+		if len(resp.Acked) == 0 {
+			fmt.Fprintln(a.Out, "已广播（0 人回执）")
+			a.warnf("没人回执，可能被 AP 隔离或省电策略挡了，跑一下 xlan doctor。")
+		} else {
+			fmt.Fprintf(a.Out, "已送达：%s\n", strings.Join(resp.Acked, "、"))
+		}
+		return core.ExitOK
+	}
+	fmt.Fprintf(a.Out, "已发送给 %s\n", strings.Join(resp.Acked, "、"))
+	return core.ExitOK
+}
+
+// ---------- send ----------
+
+func (a *App) cmdSend(args []string) int {
+	fs := a.flags("send")
+	to := fs.String("to", "", "目标设备")
+	all := fs.Bool("all", false, "群发给所有在线设备")
+	rest, err := parseInterspersed(fs, args)
+	if err != nil {
+		return core.ExitUsage
+	}
+	if err := a.load(); err != nil {
+		return a.fail("CONFIG", core.ExitError, err.Error())
+	}
+	arg := ""
+	if len(rest) > 0 {
+		arg = rest[0]
+	}
+	if arg == "" {
+		return a.fail("USAGE", core.ExitUsage, "用法：xlan send <文件|-> --to 设备")
+	}
+
+	src := arg
+	cleanup := func() {}
+	if arg == "-" {
+		tmp, err := bufferStdin()
+		if err != nil {
+			return a.fail("STDIN", core.ExitError, err.Error())
+		}
+		src = tmp
+		cleanup = func() { os.Remove(tmp) }
+	}
+	defer cleanup()
+
+	st, err := os.Stat(src)
+	if err != nil {
+		return a.fail("NOT_FOUND", core.ExitError, err.Error())
+	}
+	if st.IsDir() {
+		return a.fail("IS_DIR", core.ExitUsage, "第一版不支持目录，先打包成 tar 再发")
+	}
+
+	base, code := a.ensure()
+	if code != 0 {
+		return code
+	}
+	ctx := context.Background()
+	peers, err := client.Peers(ctx, base)
+	if err != nil {
+		return a.fail("PEERS", core.ExitError, err.Error())
+	}
+
+	var targets []core.Peer
+	switch {
+	case *all:
+		targets = peers
+	case *to != "":
+		p, err := resolvePeer(peers, *to)
+		if err != nil {
+			return a.fail("NOT_FOUND", core.ExitNoPeer, err.Error())
+		}
+		targets = []core.Peer{p}
+	default:
+		switch len(peers) {
+		case 0:
+			return a.fail("NO_PEER", core.ExitNoPeer, "没发现在线设备，先跑 xlan scan")
+		case 1:
+			targets = peers
+		default:
+			if !isTTY() || a.JSON {
+				return a.fail("NEED_TARGET", core.ExitUsage,
+					"有多台设备，请用 --to 指定或加 --all。候选："+peerIDs(peers))
+			}
+			p, err := a.pickPeer(peers)
+			if err != nil {
+				return a.fail("CANCELED", core.ExitUsage, err.Error())
+			}
+			targets = []core.Peer{p}
+		}
+	}
+	if len(targets) == 0 {
+		return a.fail("NO_PEER", core.ExitNoPeer, "没发现在线设备")
+	}
+
+	failed := 0
+	for _, p := range targets {
+		if err := a.sendOne(ctx, p, src, st.Size()); err != nil {
+			failed++
+			a.warnf("%s: %v", p.Name, err)
+			if a.JSON {
+				a.emit(map[string]any{"ok": false, "peer": p.Name, "code": classify(err), "msg": err.Error()})
+			}
+		} else if a.JSON {
+			a.emit(map[string]any{"ok": true, "peer": p.Name, "id": p.ID, "size": st.Size()})
+		} else {
+			fmt.Fprintf(a.Out, "已发送给 %s\n", p.Name)
+		}
+	}
+	if failed == len(targets) {
+		return core.ExitError
+	}
+	return core.ExitOK
+}
+
+func (a *App) sendOne(ctx context.Context, peer core.Peer, src string, size int64) error {
+	base := peer.BaseURL()
+	if base == "" {
+		return errors.New("这台设备没有可用地址")
+	}
+	sum, err := fileSHA256(src)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Offer(ctx, base, client.OfferReq{
+		FromID: a.self().ID, FromName: a.self().Name, ToID: peer.ID,
+		Kind: string(core.KindFile), Name: filepath.Base(src), Size: size, SHA256: sum,
+	})
+	if err != nil {
+		return err
+	}
+	if !resp.Accepted {
+		a.warnf("等待 %s 确认…", peer.Name)
+		deadline := time.Now().Add(a.Timeout)
+		for time.Now().Before(deadline) {
+			time.Sleep(400 * time.Millisecond)
+			s, err := client.GetOffer(ctx, base, resp.ID)
+			if err != nil {
+				return err
+			}
+			switch s.Status {
+			case string(core.StatusActive):
+				goto upload
+			case string(core.StatusFailed), string(core.StatusExpired):
+				return errors.New("对方拒绝了")
+			}
+		}
+		return errors.New("对方没有在超时前确认")
+	}
+
+upload:
+	f, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	var off int64
+	for off < size {
+		n := int64(chunkSize)
+		if size-off < n {
+			n = size - off
+		}
+		if _, err := f.Seek(off, io.SeekStart); err != nil {
+			return err
+		}
+		if err := client.PutRange(ctx, base, resp.ID, io.LimitReader(f, n), off, n, size); err != nil {
+			return err
+		}
+		off += n
+		if !a.Quiet {
+			fmt.Fprintf(a.Err, "\r%s  %d%%", peer.Name, off*100/size)
+		}
+	}
+	if !a.Quiet {
+		fmt.Fprintln(a.Err)
+	}
+	return nil
+}
+
+func (a *App) pickPeer(peers []core.Peer) (core.Peer, error) {
+	fmt.Fprintln(a.Err, "发给哪台？")
+	for i, p := range peers {
+		fmt.Fprintf(a.Err, "  %d) %s  %s\n", i+1, p.Name, p.Addr)
+	}
+	fmt.Fprint(a.Err, "> ")
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		return core.Peer{}, errors.New("没有读到选择")
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil || n < 1 || n > len(peers) {
+		return core.Peer{}, errors.New("选择无效")
+	}
+	return peers[n-1], nil
+}
+
+// ---------- inbox ----------
+
+func (a *App) cmdInbox(args []string) int {
+	fs := a.flags("inbox")
+	n := fs.Int("n", 20, "条数")
+	since := fs.Duration("since", 0, "只看这段时间之后")
+	watch := fs.Bool("watch", false, "实时跟随")
+	rest, err := parseInterspersed(fs, args)
+	if err != nil {
+		return core.ExitUsage
+	}
+	if err := a.load(); err != nil {
+		return a.fail("CONFIG", core.ExitError, err.Error())
+	}
+
+	var sub, subID string
+	if len(rest) > 0 {
+		sub = rest[0]
+	}
+	if len(rest) > 1 {
+		subID = rest[1]
+	}
+	if sub == "accept" || sub == "reject" {
+		return a.decide(sub, subID)
+	}
+
+	base, code := a.ensure()
+	if code != 0 {
+		return code
+	}
+	ctx := context.Background()
+
+	if *watch {
+		return a.watchInbox(ctx, base)
+	}
+
+	var sinceTs int64
+	if *since > 0 {
+		sinceTs = time.Now().Add(-*since).Unix()
+	}
+	items, err := client.Inbox(ctx, base, *n, sinceTs)
+	if err != nil {
+		return a.fail("INBOX", core.ExitError, err.Error())
+	}
+	if a.JSON {
+		a.emit(map[string]any{"ok": true, "items": items})
+		return core.ExitOK
+	}
+	if len(items) == 0 {
+		fmt.Fprintln(a.Out, "收件箱是空的。")
+		return core.ExitOK
+	}
+	for _, it := range items {
+		fmt.Fprintln(a.Out, formatItem(it))
+	}
+	return core.ExitOK
+}
+
+func (a *App) watchInbox(ctx context.Context, base string) int {
+	ch, err := client.Watch(ctx, base)
+	if err != nil {
+		return a.fail("WATCH", core.ExitError, err.Error())
+	}
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt)
+	defer stop()
+	for {
+		select {
+		case ev, ok := <-ch:
+			if !ok {
+				return core.ExitOK
+			}
+			b, _ := json.Marshal(ev)
+			if a.JSON {
+				fmt.Fprintln(a.Out, string(b))
+				continue
+			}
+			fmt.Fprintf(a.Out, "[%s] %s\n", time.Unix(ev.Ts, 0).Format("15:04:05"), string(b))
+		case <-ctx.Done():
+			return core.ExitOK
+		}
+	}
+}
+
+func (a *App) decide(action, id string) int {
+	if id == "" {
+		return a.fail("USAGE", core.ExitUsage, "用法：xlan inbox "+action+" <id>")
+	}
+	base, code := a.ensure()
+	if code != 0 {
+		return code
+	}
+	if err := client.Decision(context.Background(), base, id, action); err != nil {
+		return a.fail("DECISION", core.ExitError, err.Error())
+	}
+	if a.JSON {
+		a.emit(map[string]any{"ok": true, "id": id, "action": action})
+	} else {
+		fmt.Fprintf(a.Out, "已%s %s\n", map[string]string{"accept": "接受", "reject": "拒绝"}[action], id)
+	}
+	return core.ExitOK
+}
+
+// ---------- recv ----------
+
+func (a *App) cmdRecv(args []string) int {
+	fs := a.flags("recv")
+	out := fs.String("out", "", "输出路径，- 表示 stdout")
+	rest, err := parseInterspersed(fs, args)
+	if err != nil {
+		return core.ExitUsage
+	}
+	id := ""
+	if len(rest) > 0 {
+		id = rest[0]
+	}
+	if id == "" {
+		return a.fail("USAGE", core.ExitUsage, "用法：xlan recv <id> [--out 路径]")
+	}
+	if err := a.load(); err != nil {
+		return a.fail("CONFIG", core.ExitError, err.Error())
+	}
+	base, code := a.ensure()
+	if code != 0 {
+		return code
+	}
+	it, err := client.GetItem(context.Background(), base, id)
+	if err != nil {
+		return a.fail("NOT_FOUND", core.ExitNoPeer, err.Error())
+	}
+
+	switch {
+	case it.Kind == core.KindText:
+		if *out == "" || *out == "-" {
+			fmt.Fprintln(a.Out, it.Body)
+			return core.ExitOK
+		}
+		if err := os.WriteFile(*out, []byte(it.Body), 0o644); err != nil {
+			return a.fail("WRITE", core.ExitError, err.Error())
+		}
+	case it.Path == "":
+		return a.fail("NO_PATH", core.ExitError, "这条记录还没有落盘")
+	default:
+		dst := *out
+		if dst == "" || dst == "-" {
+			if err := copyFile(it.Path, a.Out); err != nil {
+				return a.fail("READ", core.ExitError, err.Error())
+			}
+			return core.ExitOK
+		}
+		if err := copyFileTo(it.Path, dst); err != nil {
+			return a.fail("WRITE", core.ExitError, err.Error())
+		}
+	}
+	if !a.JSON {
+		fmt.Fprintf(a.Out, "已写出 %s\n", *out)
+	}
+	return core.ExitOK
+}
+
+// ---------- trust ----------
+
+func (a *App) cmdTrust(args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(a.Out, "用法：xlan trust add|rm <设备> | list")
+		return core.ExitUsage
+	}
+	if err := a.load(); err != nil {
+		return a.fail("CONFIG", core.ExitError, err.Error())
+	}
+	base, code := a.ensure()
+	if code != 0 {
+		return code
+	}
+	ctx := context.Background()
+
+	if args[0] == "list" {
+		peers, err := client.Peers(ctx, base)
+		if err != nil {
+			return a.fail("PEERS", core.ExitError, err.Error())
+		}
+		if a.JSON {
+			a.emit(map[string]any{"ok": true, "peers": peers})
+			return core.ExitOK
+		}
+		for _, p := range peers {
+			mark := "-"
+			if p.Trusted {
+				mark = "*"
+			}
+			fmt.Fprintf(a.Out, "%s %-18s %s\n", mark, p.Name, p.ID)
+		}
+		return core.ExitOK
+	}
+	if len(args) < 2 {
+		return a.fail("USAGE", core.ExitUsage, "用法：xlan trust add|rm <设备>")
+	}
+	peers, err := client.Peers(ctx, base)
+	if err != nil {
+		return a.fail("PEERS", core.ExitError, err.Error())
+	}
+	p, err := resolvePeer(peers, args[1])
+	if err != nil {
+		return a.fail("NOT_FOUND", core.ExitNoPeer, err.Error())
+	}
+	trusted := args[0] == "add"
+	if err := client.SetTrusted(ctx, base, p.ID, trusted); err != nil {
+		return a.fail("TRUST", core.ExitError, err.Error())
+	}
+	if a.JSON {
+		a.emit(map[string]any{"ok": true, "id": p.ID, "trusted": trusted})
+	} else if trusted {
+		fmt.Fprintf(a.Out, "已信任 %s\n", p.Name)
+	} else {
+		fmt.Fprintf(a.Out, "已取消信任 %s\n", p.Name)
+	}
+	return core.ExitOK
+}
+
+// ---------- doctor ----------
+
+func (a *App) cmdDoctor(args []string) int {
+	fs := a.flags("doctor")
+	fs.Parse(args)
+	if err := a.load(); err != nil {
+		return a.fail("CONFIG", core.ExitError, err.Error())
+	}
+	ctx := context.Background()
+	base := spawn.Find(ctx, a.Cfg)
+	addrs, _ := discover.BroadcastAddrs()
+
+	dir, _ := config.Dir()
+	dataDir, _ := config.DataDir()
+
+	if a.JSON {
+		a.emit(map[string]any{
+			"ok": true, "running": base != "", "base": base,
+			"config_dir": dir, "data_dir": dataDir, "recv_dir": a.Cfg.RecvDirPath(),
+			"ports": a.Cfg.APIPorts,
+			"broadcast": func() []string {
+				var s []string
+				for _, ip := range addrs {
+					s = append(s, ip.String())
+				}
+				return s
+			}(),
+		})
+		return core.ExitOK
+	}
+	fmt.Fprintf(a.Out, "服务：   %s\n", orDash(base))
+	fmt.Fprintf(a.Out, "配置：   %s\n", dir)
+	fmt.Fprintf(a.Out, "数据：   %s\n", dataDir)
+	fmt.Fprintf(a.Out, "收件：   %s\n", a.Cfg.RecvDirPath())
+	fmt.Fprintf(a.Out, "端口：   %v\n", a.Cfg.APIPorts)
+	fmt.Fprint(a.Out, "广播：   ")
+	for i, ip := range addrs {
+		if i > 0 {
+			fmt.Fprint(a.Out, " ")
+		}
+		fmt.Fprint(a.Out, ip)
+	}
+	fmt.Fprintln(a.Out)
+	return core.ExitOK
+}
+
+// ---------- helpers ----------
+
+func (a *App) self() core.Device {
+	if a.Dev.ID != "" {
+		return a.Dev
+	}
+	dataDir, _ := config.DataDir()
+	d, _ := core.LoadDevice(dataDir, a.Cfg.Name)
+	a.Dev = d
+	return d
+}
+
+func isTTY() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+func bufferStdin() (string, error) {
+	dataDir, err := config.DataDir()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(dataDir, "tmp")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp(dir, "stdin-*")
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	if _, err := io.Copy(f, os.Stdin); err != nil {
+		os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
+}
+
+func resolvePeer(peers []core.Peer, target string) (core.Peer, error) {
+	t := strings.ToLower(target)
+	var prefix []core.Peer
+	for _, p := range peers {
+		if p.ID == target || (len(target) >= 4 && strings.HasPrefix(p.ID, target)) {
+			return p, nil
+		}
+		if strings.ToLower(p.Name) == t {
+			return p, nil
+		}
+		if strings.HasPrefix(strings.ToLower(p.Name), t) {
+			prefix = append(prefix, p)
+		}
+	}
+	switch len(prefix) {
+	case 1:
+		return prefix[0], nil
+	case 0:
+		return core.Peer{}, fmt.Errorf("找不到设备 %q", target)
+	default:
+		return core.Peer{}, fmt.Errorf("%q 有歧义，候选：%s", target, peerIDs(prefix))
+	}
+}
+
+func peerIDs(ps []core.Peer) string {
+	ids := make([]string, 0, len(ps))
+	for _, p := range ps {
+		ids = append(ids, p.ID)
+	}
+	sort.Strings(ids)
+	return strings.Join(ids, ", ")
+}
+
+func formatItem(it core.Item) string {
+	ts := time.Unix(it.CreatedAt, 0).Format("01-02 15:04")
+	who := it.FromName
+	if who == "" {
+		who = it.FromID
+	}
+	switch it.Kind {
+	case core.KindText:
+		tag := "私聊"
+		if it.Channel == core.ChanPublic {
+			tag = "公共"
+		}
+		return fmt.Sprintf("%s [%s] %s: %s", ts, tag, who, it.Body)
+	default:
+		return fmt.Sprintf("%s [文件] %s: %s (%d 字节) %s", ts, who, it.Name, it.Size, it.Status)
+	}
+}
+
+func classify(err error) string {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "拒绝"):
+		return "DENIED"
+	case strings.Contains(msg, "超时") || strings.Contains(msg, "确认"):
+		return "TIMEOUT"
+	default:
+		return "ERROR"
+	}
+}
+
+func sha256Reader(r io.Reader) (string, error) {
+	h := sha256.New()
+	if _, err := io.Copy(h, r); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	return sha256Reader(f)
+}
+
+func copyFile(src string, w io.Writer) error {
+	f, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = io.Copy(w, f)
+	return err
+}
+
+func copyFileTo(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	_, err = io.Copy(out, in)
+	return err
+}
