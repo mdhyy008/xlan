@@ -10,7 +10,20 @@
 go build -o xlan ./cmd/xlan
 ```
 
-交叉编译（纯 Go，含 SQLite，不需要 C 工具链）：
+想把「哪次构建」烧进二进制（推荐，之后 `xlan --version` 能直接看出来）：
+
+```bash
+COMMIT=$(git rev-parse --short HEAD)
+BUILT=$(TZ=Asia/Shanghai date '+%Y-%m-%dT%H:%M')
+go build -trimpath -ldflags "-s -w -X xlan/core.Commit=$COMMIT -X xlan/core.BuiltAt=$BUILT" -o xlan ./cmd/xlan
+```
+
+```console
+$ xlan --version
+xlan 0.1.0 (a1b2c3d, 2026-11-04T00:14)
+```
+
+交叉编译（纯 Go，含 SQLite，不需要 C 工具链），把上面 `go build` 换成对应目标即可：
 
 ```bash
 GOOS=windows GOARCH=amd64 go build -o xlan.exe ./cmd/xlan

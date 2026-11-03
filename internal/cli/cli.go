@@ -77,7 +77,7 @@ func Run(args []string) int {
 		a.usage()
 		return core.ExitOK
 	case "version", "--version":
-		fmt.Fprintf(a.Out, "xlan %s\n", core.Version)
+		fmt.Fprintf(a.Out, "xlan %s\n", core.VersionString())
 		return core.ExitOK
 	}
 
