@@ -131,6 +131,30 @@
 `kind` 取值 `text` / `file` / `folder`；`status` 取值 `pending` / `active` / `done` / `failed`。
 `pending` 表示等你确认。
 
+### 2.5.1 `xlan ps` / `xlan pause|resume <id>`
+
+```json
+{"ok":true,"sends":[{"id":"sc8024ffe","pid":395,"started":1730000000,"target":"mbp","paths":["a.bin"],"total":1048576}]}
+```
+
+`pause` 给该任务发 SIGUSR1，`resume` 发 SIGUSR2。任务在进程退出后自动从列表消失。
+**仅 unix**：Windows 上 `pause` 返回错误。
+
+### 2.5.2 `xlan log [-n 20]` / `xlan log clean --older-than 30d`
+
+```json
+{"ok":true,"items":[{"ts":1730000000,"direction":"send","peer_name":"mbp","name":"a.bin","kind":"file","size":1048576,"status":"done","duration_ms":1200}]}
+```
+
+### 2.5.3 `xlan inbox clean --older-than 30d [--with-files] [--dry-run]`
+
+```json
+{"ok":true,"count":12,"removed_files":0}
+```
+
+`--with-files` 会真的删除收件目录里的文件，只删路径在该目录下的条目。
+`--dry-run` 只返回会删哪些，不动数据。
+
 ### 2.6 `xlan inbox accept|reject [序号|id]`
 
 ```json

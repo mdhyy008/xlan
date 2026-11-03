@@ -31,6 +31,19 @@ CREATE TABLE IF NOT EXISTS items (
 );
 CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at DESC);
 
+CREATE TABLE IF NOT EXISTS history (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts          INTEGER NOT NULL,
+  direction   TEXT NOT NULL,
+  peer_name   TEXT,
+  name        TEXT,
+  kind        TEXT,
+  size        INTEGER,
+  status      TEXT NOT NULL,
+  duration_ms INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_history_ts ON history(ts DESC);
+
 CREATE TABLE IF NOT EXISTS peers (
   id        TEXT PRIMARY KEY,
   name      TEXT NOT NULL,
@@ -197,6 +210,81 @@ func (s *Store) GetRanges(id string) (string, error) {
 		return "", nil
 	}
 	return v.String, err
+}
+
+// ListBefore 返回早于 cutoff 的条目。
+func (s *Store) ListBefore(cutoff int64, limit int) ([]core.Item, error) {
+	q := `SELECT ` + itemCols + ` FROM items WHERE created_at < ? ORDER BY created_at ASC`
+	args := []any{cutoff}
+	if limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []core.Item{}
+	for rows.Next() {
+		it, err := scanItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// DeleteBefore 删掉早于 cutoff 的条目，返回删除的行数。
+func (s *Store) DeleteBefore(cutoff int64) (int, error) {
+	res, err := s.db.Exec(`DELETE FROM items WHERE created_at < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+func (s *Store) AddHistory(r core.TransferRecord) error {
+	_, err := s.db.Exec(`INSERT INTO history(ts,direction,peer_name,name,kind,size,status,duration_ms)
+		VALUES(?,?,?,?,?,?,?,?)`,
+		r.Ts, r.Direction, r.PeerName, r.Name, r.Kind, r.Size, r.Status, r.DurationMS)
+	return err
+}
+
+func (s *Store) ListHistory(limit int) ([]core.TransferRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(`SELECT id,ts,direction,peer_name,name,kind,size,status,duration_ms
+		FROM history ORDER BY ts DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []core.TransferRecord{}
+	for rows.Next() {
+		var r core.TransferRecord
+		var peer, name, kind sql.NullString
+		var size, dur sql.NullInt64
+		if err := rows.Scan(&r.ID, &r.Ts, &r.Direction, &peer, &name, &kind, &size, &r.Status, &dur); err != nil {
+			return nil, err
+		}
+		r.PeerName, r.Name, r.Kind = peer.String, name.String, kind.String
+		r.Size, r.DurationMS = size.Int64, dur.Int64
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteHistoryBefore(cutoff int64) (int, error) {
+	res, err := s.db.Exec(`DELETE FROM history WHERE ts < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 func (s *Store) DeleteItem(id string) error {

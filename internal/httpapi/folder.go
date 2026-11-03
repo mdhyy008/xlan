@@ -255,10 +255,21 @@ func (s *Server) handleFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(),
-		Data: map[string]any{"id": id, "status": string(core.StatusDone), "path": it.Path}})
+		Data: map[string]any{"id": id, "status": string(core.StatusDone),
+			"path": it.Path, "name": it.Name, "size": it.Size}})
 	s.clear(id)
 	s.clearProgress(id)
 	s.maybeRestart()
+
+	d := time.Now().Unix() - it.CreatedAt
+	if d < 0 {
+		d = 0
+	}
+	_ = s.Store.AddHistory(core.TransferRecord{
+		Ts: time.Now().Unix(), Direction: "recv", PeerName: it.FromName,
+		Name: it.Name, Kind: string(it.Kind), Size: it.Size, Status: "done",
+		DurationMS: d * 1000,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "done": true, "path": it.Path})
 }
 

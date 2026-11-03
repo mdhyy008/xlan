@@ -129,6 +129,8 @@ type progressEvent struct {
 type itemUpdate struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
+	Name   string `json:"name"`
+	Size   int64  `json:"size"`
 }
 
 func decodeProgress(v any) (progressEvent, bool) {

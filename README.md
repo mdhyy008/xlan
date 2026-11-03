@@ -56,6 +56,10 @@ xlan recv <id> -o -   # 把内容管道出去
 | `xlan status` | 服务状态、端口、在线设备 |
 | `xlan serve [-d] [--auto-accept]` | 前台跑服务，`-d` 放后台，`--auto-accept` 自动接收所有文件 |
 | `xlan stop` | 停掉后台服务 |
+| `xlan ps` | 正在跑的发送任务（带任务 id） |
+| `xlan pause\|resume <id>` | 暂停 / 继续某个发送任务 |
+| `xlan log [-n 20]` | 收发记录 |
+| `xlan log clean --older-than 30d` | 清理收发记录 |
 | `xlan autostart on\|off\|status` | 开机自启（Windows 注册表 / systemd / LaunchAgent） |
 | `xlan path on\|off\|status` | 把程序目录加进 PATH |
 | `xlan text <内容\|->` | 发文本，省略 `--to` 就是公共 |
@@ -64,6 +68,7 @@ xlan recv <id> -o -   # 把内容管道出去
 | `xlan inbox --watch` | 实时跟随 |
 | `xlan inbox accept\|reject [序号\|--all]` | 处理待确认的传输，`--all` 批量处理 |
 | `xlan inbox cancel [序号\|--all]` | 取消卡住的传输，`--all` 全部取消 |
+| `xlan inbox clean --older-than 30d` | 清理旧记录，加 `--with-files` 连文件一起删 |
 | `xlan recv <id> [--out 路径] [-o -]` | 取出内容，`-` 表示 stdout |
 | `xlan trust add\|rm\|list` | 信任白名单 |
 | `xlan config [get\|set\|unset]` | 查看和修改配置 |
@@ -124,6 +129,9 @@ curl -N http://127.0.0.1:43003/v1/events
 - 传大文件可以用多线程分块发送：`xlan config set threads 4`（1–8，默认 4，只影响本机发送）
 - 分块上传失败自动重试 3 次；收到的字节区间会落库，服务重启后还能接着续传
 - `xlan send --limit 5M` 可以限速，避免把整条网占满
+- 每次发送会打印一个任务 id，`xlan ps` 能看到所有在跑的，`xlan pause <id>` 暂停；终端里也可以按 Ctrl-Z 切换
+- 接收进度会出现在 `xlan inbox --watch` 的输出里
+- 每次收发都会记一条历史，`xlan log` 查看
 - 传输断掉后，`active` 的条目如果 5 分钟没有新数据会自动标记失败；也可以 `xlan inbox cancel` 立即清掉
 - 公共文本走 UDP 广播，单包 1000 字节以内；超长自动降级为逐台 TCP 投递
 - 公共文本会等 600ms 收对方回执，零回执不等于失败，但会提示可能被 AP 隔离

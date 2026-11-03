@@ -308,3 +308,49 @@ func Restart(ctx context.Context, base string) (deferred bool, inflight int64, e
 	}
 	return out.Deferred, out.Inflight, nil
 }
+
+// CleanResp 是清理收件箱的结果。
+type CleanResp struct {
+	OK           bool        `json:"ok"`
+	DryRun       bool        `json:"dry_run,omitempty"`
+	Count        int         `json:"count"`
+	RemovedFiles int         `json:"removed_files,omitempty"`
+	Items        []core.Item `json:"items,omitempty"`
+}
+
+// CleanInbox 清掉早于 olderThanSec 的记录，可选连文件一起删。
+func CleanInbox(ctx context.Context, base string, olderThanSec int64, withFiles, dryRun bool) (CleanResp, error) {
+	var out CleanResp
+	body := map[string]any{
+		"older_than_sec": olderThanSec,
+		"with_files":     withFiles,
+		"dry_run":        dryRun,
+	}
+	err := postJSON(ctx, base+"/v1/inbox/clean", body, &out)
+	return out, err
+}
+
+// AddHistory 上报一条收发记录。
+func AddHistory(ctx context.Context, base string, rec core.TransferRecord) error {
+	return postJSON(ctx, base+"/v1/history", rec, nil)
+}
+
+// History 取最近的收发记录。
+func History(ctx context.Context, base string, limit int) ([]core.TransferRecord, error) {
+	var out struct {
+		OK    bool                  `json:"ok"`
+		Items []core.TransferRecord `json:"items"`
+	}
+	err := getJSON(ctx, fmt.Sprintf("%s/v1/history?limit=%d", base, limit), &out)
+	return out.Items, err
+}
+
+// CleanHistory 清掉旧的收发记录。
+func CleanHistory(ctx context.Context, base string, olderThanSec int64) (int, error) {
+	var out struct {
+		OK    bool `json:"ok"`
+		Count int  `json:"count"`
+	}
+	err := postJSON(ctx, base+"/v1/history/clean", map[string]any{"older_than_sec": olderThanSec}, &out)
+	return out.Count, err
+}

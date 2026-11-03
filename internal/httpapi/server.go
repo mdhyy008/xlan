@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -291,6 +292,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/text", localOnly(s.handleText))
 	mux.HandleFunc("GET /v1/inbox", localOnly(s.handleInbox))
 	mux.HandleFunc("GET /v1/item/{id}", localOnly(s.handleGetItem))
+	mux.HandleFunc("POST /v1/inbox/clean", localOnly(s.handleClean))
+	mux.HandleFunc("GET /v1/history", localOnly(s.handleHistory))
+	mux.HandleFunc("POST /v1/history", localOnly(s.handleAddHistory))
+	mux.HandleFunc("POST /v1/history/clean", localOnly(s.handleCleanHistory))
 	mux.HandleFunc("POST /v1/trust", localOnly(s.handleTrust))
 	mux.HandleFunc("POST /v1/offer", s.handleOffer)
 	mux.HandleFunc("GET /v1/offer/{id}", s.handleGetOffer)
@@ -327,6 +332,118 @@ func localOnly(h http.HandlerFunc) http.HandlerFunc {
 		}
 		h(w, r)
 	}
+}
+
+// handleHistory 返回最近的收发记录。
+func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
+	limit := 20
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	items, err := s.Store.ListHistory(limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "items": items})
+}
+
+// handleAddHistory 由 CLI 上报发送结果。
+func (s *Server) handleAddHistory(w http.ResponseWriter, r *http.Request) {
+	var rec core.TransferRecord
+	if err := json.NewDecoder(r.Body).Decode(&rec); err != nil {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		return
+	}
+	if rec.Ts == 0 {
+		rec.Ts = time.Now().Unix()
+	}
+	if err := s.Store.AddHistory(rec); err != nil {
+		writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleCleanHistory 按时间清掉旧的收发记录。
+func (s *Server) handleCleanHistory(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		OlderThanSec int64 `json:"older_than_sec"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		return
+	}
+	if req.OlderThanSec <= 0 {
+		writeErr(w, http.StatusBadRequest, "BAD_AGE", "older_than_sec 必须大于 0")
+		return
+	}
+	n, err := s.Store.DeleteHistoryBefore(time.Now().Unix() - req.OlderThanSec)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "count": n})
+}
+
+// handleClean 按时间清掉旧记录，可选连文件一起删。
+func (s *Server) handleClean(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		OlderThanSec int64 `json:"older_than_sec"`
+		WithFiles    bool  `json:"with_files"`
+		DryRun       bool  `json:"dry_run"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		return
+	}
+	if req.OlderThanSec <= 0 {
+		writeErr(w, http.StatusBadRequest, "BAD_AGE", "older_than_sec 必须大于 0")
+		return
+	}
+	cutoff := time.Now().Unix() - req.OlderThanSec
+
+	items, err := s.Store.ListBefore(cutoff, 0)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
+		return
+	}
+
+	if req.DryRun {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "dry_run": true, "count": len(items), "items": items,
+		})
+		return
+	}
+
+	removedFiles := 0
+	if req.WithFiles {
+		root := filepath.Clean(s.RecvDir())
+		sep := string(os.PathSeparator)
+		for _, it := range items {
+			if it.Path == "" {
+				continue
+			}
+			p := filepath.Clean(it.Path)
+			if !strings.HasPrefix(p, root+sep) {
+				continue // 只删收件目录里的东西
+			}
+			if os.RemoveAll(p) == nil {
+				removedFiles++
+			}
+		}
+	}
+
+	n, err := s.Store.DeleteBefore(cutoff)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "count": n, "removed_files": removedFiles,
+	})
 }
 
 // doneFiles 找出目录清单里已经完整落盘的文件（尺寸对得上）。

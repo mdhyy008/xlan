@@ -302,6 +302,66 @@ xlan inbox cancel --all
 
 ---
 
+## 暂停和继续
+
+发大文件的时候想临时让一下带宽，按 **Ctrl-Z** 暂停，再按一次继续：
+
+```
+已暂停，再按一次 Ctrl-Z 继续
+继续传输
+```
+
+在别的窗口操作也行。发送开始时会给一个任务号：
+
+```
+传输 id sc8024ffe（Ctrl-Z 暂停，或 xlan pause sc8024ffe）
+```
+
+```
+xlan ps                 看看有哪些在发
+xlan pause sc8024ffe    暂停
+xlan resume sc8024ffe   继续
+```
+
+注意：暂停是**发送方**的操作。接收方只能取消，不能暂停。
+
+## 查看收发记录
+
+```
+xlan log
+```
+
+```
+2026-11-04 01:44  发送  小王的电脑  报告.pdf (2.1 MB) done
+2026-11-04 01:40  接收  小李的电脑  照片 (1.4 GB) done  2m10s
+```
+
+清理旧记录：
+
+```
+xlan log clean --older-than 30d
+```
+
+## 清理收件箱
+
+收件箱会一直攒着。清理 30 天前的记录：
+
+```
+xlan inbox clean --older-than 30d
+```
+
+连文件一起删（**会真的删掉收件目录里的文件**）：
+
+```
+xlan inbox clean --older-than 30d --with-files
+```
+
+先看看会删多少（不动手）：
+
+```
+xlan inbox clean --older-than 30d --dry-run
+```
+
 ## 文件收到哪了
 
 | 系统 | 位置 |
@@ -362,6 +422,10 @@ xlan serve -d                      后台启动服务
 xlan serve --auto-accept           自动接收所有文件
 xlan autostart on --auto-accept    开机自启并自动接收
 xlan stop                          停掉服务
+xlan ps                            看正在发的任务
+xlan pause|resume <id>             暂停 / 继续
+xlan log                           收发记录
+xlan inbox clean --older-than 30d  清理旧记录
 xlan scan                          看看谁在线
 xlan send 文件 --to 名字            发文件
 xlan send 文件夹 --to 名字          发整个文件夹

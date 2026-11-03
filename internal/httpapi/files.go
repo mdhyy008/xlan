@@ -354,11 +354,22 @@ func (s *Server) finalize(it core.Item, part string) error {
 		return err
 	}
 	s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(),
-		Data: map[string]any{"id": it.ID, "status": string(core.StatusDone), "path": final}})
+		Data: map[string]any{"id": it.ID, "status": string(core.StatusDone),
+			"path": final, "name": it.Name, "size": it.Size}})
 	s.clear(it.ID)
 	s.clearProgress(it.ID)
 	s.clearRanges(it.ID)
 	s.maybeRestart()
+
+	d := time.Now().Unix() - it.CreatedAt
+	if d < 0 {
+		d = 0
+	}
+	_ = s.Store.AddHistory(core.TransferRecord{
+		Ts: time.Now().Unix(), Direction: "recv", PeerName: it.FromName,
+		Name: it.Name, Kind: string(it.Kind), Size: it.Size, Status: "done",
+		DurationMS: d * 1000,
+	})
 	return nil
 }
 

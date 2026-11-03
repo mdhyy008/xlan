@@ -43,6 +43,7 @@ type App struct {
 	Err     io.Writer
 
 	limiter *bucket
+	pause   *pauser
 
 	// Dev 缓存本机身份；测试里可直接注入。
 	Dev core.Device
@@ -85,6 +86,14 @@ func Run(args []string) int {
 		return a.cmdDoctor(rest)
 	case "config":
 		return a.cmdConfig(rest)
+	case "log":
+		return a.cmdLog(rest)
+	case "ps":
+		return a.cmdPS(rest)
+	case "pause":
+		return a.cmdSignal(rest, true)
+	case "resume":
+		return a.cmdSignal(rest, false)
 	case "help", "-h", "--help":
 		a.usage()
 		return core.ExitOK
@@ -115,8 +124,13 @@ func (a *App) usage() {
   xlan inbox cancel [序号]         取消卡住的传输
   xlan inbox cancel --all          取消全部未完成的传输
   xlan inbox accept --all          接收全部待确认的传输
+  xlan inbox clean [--older-than 30d] [--with-files]  清理旧记录
   xlan recv <id> [--out 路径] [-o -]  取出内容
   xlan trust add|rm <设备> | list   信任白名单
+  xlan ps                           正在进行的发送任务
+  xlan pause|resume <id>           暂停 / 继续某个发送任务
+  xlan log [-n 20]                  收发记录
+  xlan log clean [--older-than 30d] 清理收发记录
   xlan config [get|set|unset]       查看和修改配置
   xlan doctor                       网络自检
 
@@ -449,6 +463,15 @@ func (a *App) cmdSend(args []string) int {
 		}
 		a.Limit = v
 	}
+
+	a.pause = newPauser()
+	a.pause.Watch(func(paused bool) {
+		if paused {
+			fmt.Fprintln(a.Err, "已暂停，再按一次 Ctrl-Z 继续")
+		} else {
+			fmt.Fprintln(a.Err, "继续传输")
+		}
+	})
 	if len(rest) == 0 {
 		return a.fail("USAGE", core.ExitUsage, "用法：xlan send <文件|目录|->... --to 设备")
 	}
@@ -532,6 +555,27 @@ func (a *App) cmdSend(args []string) int {
 		return a.fail("NO_PEER", core.ExitNoPeer, "没发现在线设备")
 	}
 
+	paths := make([]string, 0, len(sources))
+	var totalBytes int64
+	for _, s := range sources {
+		paths = append(paths, filepath.Base(s.path))
+		totalBytes += s.size
+	}
+	targetName := ""
+	if len(targets) > 0 {
+		targetName = targets[0].Name
+	}
+	sendID, regErr := registerSend(sendEntry{
+		PID: os.Getpid(), Started: time.Now().Unix(),
+		Target: targetName, Paths: paths, Total: totalBytes,
+	})
+	if regErr == nil {
+		defer unregisterSend(sendID)
+		if !a.JSON {
+			fmt.Fprintf(a.Out, "传输 id %s（Ctrl-Z 暂停，或 xlan pause %s）\n", sendID, sendID)
+		}
+	}
+
 	total := 0
 	failed := 0
 	lastCode := "ERROR"
@@ -545,6 +589,13 @@ func (a *App) cmdSend(args []string) int {
 				sendErr = a.sendOne(ctx, p, srcIt.path, srcIt.size)
 			}
 			name := filepath.Base(srcIt.path)
+			if recErr := client.AddHistory(ctx, base, core.TransferRecord{
+				Ts: time.Now().Unix(), Direction: "send", PeerName: p.Name,
+				Name: name, Kind: map[bool]string{true: "folder", false: "file"}[srcIt.isDir],
+				Size: srcIt.size, Status: map[bool]string{true: "done", false: "failed"}[sendErr == nil],
+			}); recErr != nil {
+				a.warnf("记录发送日志失败: %v", recErr)
+			}
 			if err := sendErr; err != nil {
 				failed++
 				lastCode = classify(err)
@@ -660,6 +711,9 @@ func (a *App) cmdInbox(args []string) int {
 	watch := fs.Bool("watch", false, "实时跟随")
 	noWait := fs.Bool("no-wait", false, "接收后不等传完")
 	all := fs.Bool("all", false, "全部取消")
+	olderThan := fs.String("older-than", "30d", "清理多久之前的记录")
+	withFiles := fs.Bool("with-files", false, "连文件一起删")
+	dryRun := fs.Bool("dry-run", false, "只看看会删多少")
 	rest, err := parseInterspersed(fs, args)
 	if err != nil {
 		return core.ExitUsage
@@ -674,6 +728,9 @@ func (a *App) cmdInbox(args []string) int {
 	}
 	if len(rest) > 1 {
 		subID = rest[1]
+	}
+	if sub == "clean" {
+		return a.cmdClean(*olderThan, *withFiles, *dryRun)
 	}
 	if sub == "cancel" && *all {
 		return a.cancelAll()
@@ -724,6 +781,11 @@ func (a *App) watchInbox(ctx context.Context, base string) int {
 	}
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt)
 	defer stop()
+
+	// 每个传输上一次打印到的百分比和时刻，避免刷屏
+	lastPct := map[string]int{}
+	lastAt := map[string]time.Time{}
+
 	for {
 		select {
 		case ev, ok := <-ch:
@@ -736,9 +798,42 @@ func (a *App) watchInbox(ctx context.Context, base string) int {
 				continue
 			}
 			switch ev.Type {
+			case core.EvTransfer:
+				if p, ok := decodeProgress(ev.Data); ok {
+					pct := 0
+					if p.Total > 0 {
+						pct = int(p.Received * 100 / p.Total)
+					}
+					// 每 10% 或每 2 秒打一行，别把屏幕刷爆
+					if pct/10 != lastPct[p.ID]/10 || time.Since(lastAt[p.ID]) >= 2*time.Second || pct >= 100 {
+						lastPct[p.ID] = pct
+						lastAt[p.ID] = time.Now()
+						fmt.Fprintf(a.Out, "[%s] 接收中  %3d%%  %s / %s\n",
+							time.Unix(ev.Ts, 0).Format("15:04:05"),
+							pct, humanBytes(p.Received), humanBytes(p.Total))
+					}
+					continue
+				}
 			case core.EvItemNew:
 				if it, ok := decodeItem(ev.Data); ok {
 					fmt.Fprintln(a.Out, formatItem(it))
+					continue
+				}
+			case core.EvItemUpdate:
+				if u, ok := decodeItemUpdate(ev.Data); ok {
+					label := map[string]string{
+						"done": "完成", "failed": "失败", "active": "已接受",
+					}[u.Status]
+					if label == "" {
+						label = u.Status
+					}
+					if u.Name != "" {
+						fmt.Fprintf(a.Out, "[%s] %s  %s (%s)\n",
+							time.Unix(ev.Ts, 0).Format("15:04:05"), label, u.Name, humanBytes(u.Size))
+					} else {
+						fmt.Fprintf(a.Out, "[%s] %s  %s\n",
+							time.Unix(ev.Ts, 0).Format("15:04:05"), label, u.ID)
+					}
 					continue
 				}
 			case core.EvPeerOnline:
@@ -1258,6 +1353,9 @@ func (a *App) uploadOne(ctx context.Context, size int64, threads int,
 	if threads <= 1 {
 		var off int64
 		for off < size {
+			if a.pause != nil {
+				a.pause.Wait()
+			}
 			n := int64(chunkSize)
 			if size-off < n {
 				n = size - off
@@ -1296,6 +1394,9 @@ func (a *App) uploadOne(ctx context.Context, size int64, threads int,
 			defer func() { <-sem }()
 			if ctx.Err() != nil {
 				return
+			}
+			if a.pause != nil {
+				a.pause.Wait()
 			}
 			if err := put(ctx, off, n); err != nil {
 				mu.Lock()
@@ -1804,4 +1905,186 @@ func manifestID(m core.Manifest) string {
 		fmt.Fprintf(h, "%s|%v|%d|%s\n", e.Rel, e.Dir, e.Size, e.SHA256)
 	}
 	return "d" + hex.EncodeToString(h.Sum(nil))[:15]
+}
+
+// parseAge 解析 "30d" / "12h" / "45m" 这类时长。
+func parseAge(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if strings.HasSuffix(s, "d") {
+		n, err := strconv.ParseFloat(strings.TrimSuffix(s, "d"), 64)
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("时长写法不对：%q，例如 30d、12h", s)
+		}
+		return time.Duration(n * 24 * float64(time.Hour)), nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("时长写法不对：%q，例如 30d、12h", s)
+	}
+	return d, nil
+}
+
+// cmdClean 清理收件箱里的旧记录。
+func (a *App) cmdClean(olderThan string, withFiles, dryRun bool) int {
+	d, err := parseAge(olderThan)
+	if err != nil {
+		return a.fail("AGE", core.ExitUsage, err.Error())
+	}
+	base, code := a.requireService()
+	if code != 0 {
+		return code
+	}
+	resp, err := client.CleanInbox(context.Background(), base, int64(d.Seconds()), withFiles, dryRun)
+	if err != nil {
+		return a.fail("CLEAN", core.ExitError, err.Error())
+	}
+
+	if a.JSON {
+		a.emit(resp)
+		return core.ExitOK
+	}
+	if dryRun {
+		fmt.Fprintf(a.Out, "会删除 %d 条 %s 之前的记录", resp.Count, olderThan)
+		if withFiles {
+			fmt.Fprint(a.Out, "，以及对应文件")
+		}
+		fmt.Fprintln(a.Out)
+		for i, it := range resp.Items {
+			if i >= 20 {
+				fmt.Fprintf(a.Out, "…还有 %d 条\n", len(resp.Items)-i)
+				break
+			}
+			fmt.Fprintf(a.Out, "  %s %s\n", time.Unix(it.CreatedAt, 0).Format("2006-01-02"), it.Name)
+		}
+		return core.ExitOK
+	}
+	fmt.Fprintf(a.Out, "已删除 %d 条记录", resp.Count)
+	if withFiles {
+		fmt.Fprintf(a.Out, "，%d 个文件", resp.RemovedFiles)
+	}
+	fmt.Fprintln(a.Out)
+	return core.ExitOK
+}
+
+// cmdLog 查看和清理收发记录。
+func (a *App) cmdLog(args []string) int {
+	fs := a.flags("log")
+	n := fs.Int("n", 20, "条数")
+	olderThan := fs.String("older-than", "30d", "清理多久之前的记录")
+	rest, err := parseInterspersed(fs, args)
+	if err != nil {
+		return core.ExitUsage
+	}
+	if err := a.load(); err != nil {
+		return a.fail("CONFIG", core.ExitError, err.Error())
+	}
+	base, code := a.requireService()
+	if code != 0 {
+		return code
+	}
+	ctx := context.Background()
+
+	if len(rest) > 0 && rest[0] == "clean" {
+		d, err := parseAge(*olderThan)
+		if err != nil {
+			return a.fail("AGE", core.ExitUsage, err.Error())
+		}
+		cnt, err := client.CleanHistory(ctx, base, int64(d.Seconds()))
+		if err != nil {
+			return a.fail("CLEAN", core.ExitError, err.Error())
+		}
+		if a.JSON {
+			a.emit(map[string]any{"ok": true, "count": cnt})
+		} else {
+			fmt.Fprintf(a.Out, "已删除 %d 条记录\n", cnt)
+		}
+		return core.ExitOK
+	}
+
+	items, err := client.History(ctx, base, *n)
+	if err != nil {
+		return a.fail("LOG", core.ExitError, err.Error())
+	}
+	if a.JSON {
+		a.emit(map[string]any{"ok": true, "items": items})
+		return core.ExitOK
+	}
+	if len(items) == 0 {
+		fmt.Fprintln(a.Out, "还没有收发记录。")
+		return core.ExitOK
+	}
+	for _, r := range items {
+		dir := "发送"
+		if r.Direction == "recv" {
+			dir = "接收"
+		}
+		who := r.PeerName
+		if who == "" {
+			who = "-"
+		}
+		line := fmt.Sprintf("%s  %s  %-12s  %s (%s) %s",
+			time.Unix(r.Ts, 0).Format("2006-01-02 15:04"), dir, who, r.Name,
+			humanBytes(r.Size), r.Status)
+		if r.DurationMS > 0 {
+			line += "  " + (time.Duration(r.DurationMS) * time.Millisecond).Round(time.Second).String()
+		}
+		fmt.Fprintln(a.Out, line)
+	}
+	return core.ExitOK
+}
+
+// cmdPS 列出正在跑的发送任务。
+func (a *App) cmdPS(args []string) int {
+	fs := a.flags("ps")
+	if _, err := parseInterspersed(fs, args); err != nil {
+		return core.ExitUsage
+	}
+	list := listSends()
+	if a.JSON {
+		a.emit(map[string]any{"ok": true, "sends": list})
+		return core.ExitOK
+	}
+	if len(list) == 0 {
+		fmt.Fprintln(a.Out, "没有正在进行的发送任务。")
+		return core.ExitOK
+	}
+	fmt.Fprintf(a.Out, "%-10s %-8s %-16s %-10s %s\n", "ID", "PID", "目标", "已用时", "内容")
+	for _, e := range list {
+		fmt.Fprintf(a.Out, "%-10s %-8d %-16s %-10s %s\n",
+			e.ID, e.PID, e.Target, elapsedOf(e), strings.Join(e.Paths, ", "))
+	}
+	return core.ExitOK
+}
+
+// cmdSignal 暂停或继续某个发送任务。
+func (a *App) cmdSignal(args []string, pause bool) int {
+	fs := a.flags("pause")
+	rest, err := parseInterspersed(fs, args)
+	if err != nil {
+		return core.ExitUsage
+	}
+	verb := "暂停"
+	if !pause {
+		verb = "继续"
+	}
+	id := ""
+	if len(rest) > 0 {
+		id = rest[0]
+	}
+	if id == "" {
+		return a.fail("USAGE", core.ExitUsage, "用法：xlan "+map[bool]string{true: "pause", false: "resume"}[pause]+" <任务 id>")
+	}
+	e, ok := findSend(id)
+	if !ok {
+		return a.fail("NOT_FOUND", core.ExitNoPeer, "没有这个发送任务："+id+"（用 xlan ps 看）")
+	}
+	if err := signalSend(e.PID, pause); err != nil {
+		return a.fail("SIGNAL", core.ExitError, err.Error())
+	}
+	if a.JSON {
+		a.emit(map[string]any{"ok": true, "id": e.ID, "paused": pause})
+	} else {
+		fmt.Fprintf(a.Out, "已%s %s\n", verb, e.ID)
+	}
+	return core.ExitOK
 }
