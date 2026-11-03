@@ -716,9 +716,9 @@ func (s *Server) sendPublic(w http.ResponseWriter, r *http.Request, body string)
 }
 
 func (s *Server) sendDM(w http.ResponseWriter, r *http.Request, to, body string) {
-	peer, ok := s.resolvePeer(to)
-	if !ok {
-		writeErr(w, http.StatusNotFound, "NOT_FOUND", "device not found: "+to)
+	peer, err := s.resolvePeer(to)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "NOT_FOUND", err.Error())
 		return
 	}
 	if err := s.pushText(r.Context(), peer, core.ChanDM, body); err != nil {
@@ -742,34 +742,70 @@ func (s *Server) pushText(ctx context.Context, peer core.Peer, ch core.Channel, 
 	return err
 }
 
-// resolvePeer 支持完整 id、id 前缀、设备名前缀，歧义时报错由调用方处理。
-func (s *Server) resolvePeer(target string) (core.Peer, bool) {
+// resolvePeer 支持完整 id、id 前缀、设备名；重名或前缀撞车时报错，不瞎猜。
+func (s *Server) resolvePeer(target string) (core.Peer, error) {
 	peers, err := s.Store.ListPeers()
 	if err != nil {
-		return core.Peer{}, false
+		return core.Peer{}, err
 	}
-	t := strings.ToLower(target)
-	var byName []core.Peer
 	for _, p := range peers {
 		if p.ID == target {
-			return p, true
+			return p, nil
 		}
-		if strings.HasPrefix(p.ID, target) {
-			return p, true
+	}
+	if len(target) >= 4 {
+		var m []core.Peer
+		for _, p := range peers {
+			if strings.HasPrefix(p.ID, target) {
+				m = append(m, p)
+			}
 		}
+		if len(m) == 1 {
+			return m[0], nil
+		}
+		if len(m) > 1 {
+			return core.Peer{}, ambiguous(target, m)
+		}
+	}
+	t := strings.ToLower(target)
+	var exact []core.Peer
+	for _, p := range peers {
 		if strings.ToLower(p.Name) == t {
-			return p, true
+			exact = append(exact, p)
 		}
+	}
+	if len(exact) == 1 {
+		return exact[0], nil
+	}
+	if len(exact) > 1 {
+		return core.Peer{}, ambiguous(target, exact)
+	}
+	var pref []core.Peer
+	for _, p := range peers {
 		if strings.HasPrefix(strings.ToLower(p.Name), t) {
-			byName = append(byName, p)
+			pref = append(pref, p)
 		}
 	}
-	if len(byName) == 1 {
-		return byName[0], true
+	if len(pref) == 1 {
+		return pref[0], nil
 	}
-	return core.Peer{}, false
+	if len(pref) > 1 {
+		return core.Peer{}, ambiguous(target, pref)
+	}
+	return core.Peer{}, fmt.Errorf("找不到设备 %q", target)
 }
 
+func ambiguous(target string, m []core.Peer) error {
+	parts := make([]string, 0, len(m))
+	for _, p := range m {
+		id := p.ID
+		if len(id) > 8 {
+			id = id[:8]
+		}
+		parts = append(parts, fmt.Sprintf("%s(%s)", p.Name, id))
+	}
+	return fmt.Errorf("%q 匹配到 %d 台设备，请用 id 指定：%s", target, len(m), strings.Join(parts, "，"))
+}
 func (s *Server) broadcastTargets() []*net.UDPAddr {
 	ips, err := discover.BroadcastAddrs()
 	if err != nil || len(ips) == 0 {

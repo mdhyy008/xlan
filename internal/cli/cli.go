@@ -1417,29 +1417,72 @@ func bufferStdin() (string, error) {
 }
 
 func resolvePeer(peers []core.Peer, target string) (core.Peer, error) {
-	t := strings.ToLower(target)
-	var prefix []core.Peer
+	// 1. 完整 id
 	for _, p := range peers {
-		if p.ID == target || (len(target) >= 4 && strings.HasPrefix(p.ID, target)) {
+		if p.ID == target {
 			return p, nil
 		}
+	}
+	// 2. id 前缀（至少 4 位，避免误匹配）
+	if len(target) >= 4 {
+		var m []core.Peer
+		for _, p := range peers {
+			if strings.HasPrefix(p.ID, target) {
+				m = append(m, p)
+			}
+		}
+		if len(m) == 1 {
+			return m[0], nil
+		}
+		if len(m) > 1 {
+			return core.Peer{}, ambiguousPeer(target, m)
+		}
+	}
+	// 3. 完整名字
+	t := strings.ToLower(target)
+	var exact []core.Peer
+	for _, p := range peers {
 		if strings.ToLower(p.Name) == t {
-			return p, nil
+			exact = append(exact, p)
 		}
+	}
+	if len(exact) == 1 {
+		return exact[0], nil
+	}
+	if len(exact) > 1 {
+		return core.Peer{}, ambiguousPeer(target, exact)
+	}
+	// 4. 名字前缀
+	var pref []core.Peer
+	for _, p := range peers {
 		if strings.HasPrefix(strings.ToLower(p.Name), t) {
-			prefix = append(prefix, p)
+			pref = append(pref, p)
 		}
 	}
-	switch len(prefix) {
-	case 1:
-		return prefix[0], nil
-	case 0:
-		return core.Peer{}, fmt.Errorf("找不到设备 %q", target)
-	default:
-		return core.Peer{}, fmt.Errorf("%q 有歧义，候选：%s", target, peerIDs(prefix))
+	if len(pref) == 1 {
+		return pref[0], nil
 	}
+	if len(pref) > 1 {
+		return core.Peer{}, ambiguousPeer(target, pref)
+	}
+	return core.Peer{}, fmt.Errorf("找不到设备 %q", target)
 }
 
+// ambiguousPeer 在重名或前缀撞车时，把候选和它们的 id 一起列出来。
+func ambiguousPeer(target string, m []core.Peer) error {
+	parts := make([]string, 0, len(m))
+	for _, p := range m {
+		parts = append(parts, fmt.Sprintf("%s(%s)", p.Name, shortID(p.ID)))
+	}
+	return fmt.Errorf("%q 匹配到 %d 台设备，请用 id 指定：%s", target, len(m), strings.Join(parts, "，"))
+}
+
+func shortID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
 func peerIDs(ps []core.Peer) string {
 	ids := make([]string, 0, len(ps))
 	for _, p := range ps {
