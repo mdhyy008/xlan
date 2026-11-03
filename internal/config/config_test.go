@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -34,8 +36,14 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 
 func TestRecvDirPath(t *testing.T) {
 	c := Default()
-	if !strings.HasSuffix(c.RecvDirPath(), "Downloads/xlan") {
-		t.Fatalf("unexpected default: %s", c.RecvDirPath())
+	got := c.RecvDirPath()
+	if got != filepath.Join(DownloadsDir(), "xlan") {
+		t.Fatalf("默认收件目录应跟着下载目录走: %s", got)
+	}
+	if _, err := os.Stat("/sdcard/Download"); err == nil {
+		if got != "/sdcard/Download/xlan" {
+			t.Fatalf("安卓上应该用 /sdcard/Download/xlan，实际 %s", got)
+		}
 	}
 	c.RecvDir = "~/Downloads/xlan-test"
 	if strings.Contains(c.RecvDirPath(), "~") {

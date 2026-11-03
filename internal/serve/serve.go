@@ -89,9 +89,24 @@ func Run(ctx context.Context, cfgDir string) error {
 		bus.Publish(core.Event{Type: core.EvItemNew, Ts: it.CreatedAt, Data: it})
 	}
 
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// 收件目录在启动时定下来，传输中途不会换地方，避免续传对不上。
+	recvDir := cfg.RecvDirPath()
+	restartCh := make(chan struct{}, 1)
+
 	srv := &httpapi.Server{
 		Dev: dev, Port: port, Store: st, Disc: disc, Pub: pub, Bus: bus,
-		RecvDir: cfg.RecvDirPath(), StartedAt: time.Now(),
+		RecvDir:   func() string { return recvDir },
+		StartedAt: time.Now(),
+		Shutdown:  cancel,
+		RequestRestart: func() {
+			select {
+			case restartCh <- struct{}{}:
+			default:
+			}
+		},
 	}
 	hs := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
 
@@ -110,8 +125,13 @@ func Run(ctx context.Context, cfgDir string) error {
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-runCtx.Done():
 			shutdown(hs)
+			return nil
+		case <-restartCh:
+			// 先放掉监听端口，再拉新进程，避免新进程绑不上。
+			shutdown(hs)
+			_ = spawn.RestartSelf(cfgDir)
 			return nil
 		case err := <-errCh:
 			if errors.Is(err, http.ErrServerClosed) {

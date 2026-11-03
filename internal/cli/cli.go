@@ -71,6 +71,8 @@ func Run(args []string) int {
 		return a.cmdTrust(rest)
 	case "doctor":
 		return a.cmdDoctor(rest)
+	case "config":
+		return a.cmdConfig(rest)
 	case "help", "-h", "--help":
 		a.usage()
 		return core.ExitOK
@@ -97,6 +99,7 @@ func (a *App) usage() {
   xlan inbox accept|reject <id>     处理待确认的传输
   xlan recv <id> [--out 路径] [-o -]  取出内容
   xlan trust add|rm <设备> | list   信任白名单
+  xlan config [get|set|unset]       查看和修改配置
   xlan doctor                       网络自检
 
 全局参数：--json --quiet --timeout 60s --config 目录
@@ -1079,4 +1082,170 @@ func decodePeer(v any) (core.Peer, bool) {
 		return core.Peer{}, false
 	}
 	return p, true
+}
+
+// ---------- config ----------
+
+func (a *App) cmdConfig(args []string) int {
+	fs := a.flags("config")
+	rest, err := parseInterspersed(fs, args)
+	if err != nil {
+		return core.ExitUsage
+	}
+	if err := a.load(); err != nil {
+		return a.fail("CONFIG", core.ExitError, err.Error())
+	}
+
+	if len(rest) == 0 || rest[0] == "list" {
+		a.printConfig()
+		return core.ExitOK
+	}
+
+	switch rest[0] {
+	case "get":
+		if len(rest) < 2 {
+			return a.fail("USAGE", core.ExitUsage, "用法：xlan config get <键>")
+		}
+		v, ok := a.configValue(rest[1])
+		if !ok {
+			return a.fail("NO_KEY", core.ExitUsage, "没有这个配置项："+rest[1])
+		}
+		if a.JSON {
+			a.emit(map[string]any{"ok": true, "key": rest[1], "value": v})
+		} else {
+			fmt.Fprintln(a.Out, v)
+		}
+		return core.ExitOK
+
+	case "set", "unset":
+		if len(rest) < 2 {
+			return a.fail("USAGE", core.ExitUsage, "用法：xlan config "+rest[0]+" <键> [值]")
+		}
+		val := ""
+		if rest[0] == "set" {
+			if len(rest) < 3 {
+				return a.fail("USAGE", core.ExitUsage, "用法：xlan config set <键> <值>")
+			}
+			val = rest[2]
+		}
+		if err := a.applyConfig(rest[1], val); err != nil {
+			return a.fail("BAD_KEY", core.ExitUsage, err.Error())
+		}
+		if err := a.Cfg.Save(a.CfgDir); err != nil {
+			return a.fail("SAVE", core.ExitError, err.Error())
+		}
+		outcome, inflight := a.applyByRestart()
+		if a.JSON {
+			a.emit(map[string]any{
+				"ok": true, "key": rest[1], "value": val,
+				"restarted": outcome == restartNow,
+				"deferred":  outcome == restartDeferred,
+				"inflight":  inflight,
+			})
+			return core.ExitOK
+		}
+		fmt.Fprintf(a.Out, "%s = %s\n", rest[1], a.mustValue(rest[1]))
+		switch outcome {
+		case restartNow:
+			fmt.Fprintln(a.Out, "服务已重启，立即生效。")
+		case restartDeferred:
+			fmt.Fprintf(a.Out, "已保存。还有 %d 个传输在进行，等它们跑完自动重启。\n", inflight)
+		case restartNotRunning:
+			fmt.Fprintln(a.Out, "已保存，服务没在跑，下次启动时生效。")
+		default:
+			fmt.Fprintln(a.Out, "已保存，但服务没能重启，手动跑一次 xlan serve 才能生效。")
+		}
+		return core.ExitOK
+	}
+
+	return a.fail("USAGE", core.ExitUsage, "用法：xlan config [list|get|set|unset]")
+}
+
+func (a *App) printConfig() {
+	dir, _ := config.Dir()
+	if a.JSON {
+		a.emit(map[string]any{
+			"ok": true, "config": filepath.Join(dir, "config.json"),
+			"recv_dir": a.Cfg.RecvDirPath(), "name": a.mustValue("name"),
+			"api_ports": a.Cfg.APIPorts,
+		})
+		return
+	}
+	fmt.Fprintf(a.Out, "recv_dir  %s\n", a.Cfg.RecvDirPath())
+	fmt.Fprintf(a.Out, "name      %s\n", a.mustValue("name"))
+	fmt.Fprintf(a.Out, "api_ports %v\n", a.Cfg.APIPorts)
+	fmt.Fprintf(a.Out, "配置      %s\n", filepath.Join(dir, "config.json"))
+}
+
+func (a *App) configValue(key string) (string, bool) {
+	switch key {
+	case "recv_dir":
+		return a.Cfg.RecvDirPath(), true
+	case "name":
+		if a.Cfg.Name != "" {
+			return a.Cfg.Name, true
+		}
+		return a.self().Name, true
+	}
+	return "", false
+}
+
+func (a *App) mustValue(key string) string {
+	v, _ := a.configValue(key)
+	return v
+}
+
+func (a *App) applyConfig(key, val string) error {
+	switch key {
+	case "recv_dir":
+		a.Cfg.RecvDir = val
+	case "name":
+		a.Cfg.Name = val
+	default:
+		return errors.New("可改的项：recv_dir、name")
+	}
+	return nil
+}
+
+type restartOutcome int
+
+const (
+	restartFailed restartOutcome = iota
+	restartNow
+	restartDeferred
+	restartNotRunning
+)
+
+// applyByRestart 让运行中的服务重启：空闲就立刻重启，有传输在跑就等它们跑完。
+func (a *App) applyByRestart() (restartOutcome, int64) {
+	ctx := context.Background()
+	base := spawn.Find(ctx, a.Cfg)
+	if base == "" {
+		return restartNotRunning, 0
+	}
+	deferred, inflight, err := client.Restart(ctx, base)
+	if err != nil {
+		return restartFailed, 0
+	}
+	if deferred {
+		return restartDeferred, inflight
+	}
+	if a.waitFresh(ctx) {
+		return restartNow, 0
+	}
+	return restartFailed, 0
+}
+
+// waitFresh 等新实例接手，uptime 归零才算真的重启了。
+func (a *App) waitFresh(ctx context.Context) bool {
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		if b := spawn.Find(ctx, a.Cfg); b != "" {
+			if info, err := client.GetInfo(ctx, b); err == nil && info.UptimeSec <= 5 {
+				return true
+			}
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+	return false
 }

@@ -32,7 +32,7 @@ func newTestServer(t *testing.T) (*Server, *httptest.Server, string) {
 		Port:      43003,
 		Store:     st,
 		Bus:       events.New(),
-		RecvDir:   filepath.Join(dir, "recv"),
+		RecvDir:   func() string { return filepath.Join(dir, "recv") },
 		StartedAt: time.Now(),
 	}
 	ts := httptest.NewServer(s.Handler())

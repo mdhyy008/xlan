@@ -150,6 +150,7 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Action {
 	case "accept":
+		s.touch(id)
 		if it.Kind == core.KindFolder {
 			if _, err := s.acceptFolder(it); err != nil {
 				writeErr(w, http.StatusInternalServerError, "FOLDER", err.Error())
@@ -168,6 +169,8 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 			Data: map[string]any{"id": id, "status": string(core.StatusActive)}})
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "active"})
 	case "reject":
+		s.clear(id)
+		defer s.maybeRestart()
 		if err := s.Store.UpdateItemStatus(id, core.StatusFailed, it.Path); err != nil {
 			writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
 			return
@@ -182,6 +185,9 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePutData(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	s.touch(id)
+	defer s.touch(id)
+
 	it, ok, err := s.Store.GetItem(id)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
@@ -272,10 +278,11 @@ func (s *Server) finalize(it core.Item, part string) error {
 			return fmt.Errorf("%w: want %s, got %s", ErrChecksum, it.SHA256, got)
 		}
 	}
-	if err := os.MkdirAll(s.RecvDir, 0o755); err != nil {
+	dir := s.RecvDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	final := uniquePath(s.RecvDir, it.Name)
+	final := uniquePath(dir, it.Name)
 	if err := os.Rename(part, final); err != nil {
 		return err
 	}
@@ -284,11 +291,13 @@ func (s *Server) finalize(it core.Item, part string) error {
 	}
 	s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(),
 		Data: map[string]any{"id": it.ID, "status": string(core.StatusDone), "path": final}})
+	s.clear(it.ID)
+	s.maybeRestart()
 	return nil
 }
 
 func (s *Server) partPath(id string) string {
-	return filepath.Join(s.RecvDir, ".parts", safeID(id)+".part")
+	return filepath.Join(s.RecvDir(), ".parts", safeID(id)+".part")
 }
 
 func safeID(id string) string {

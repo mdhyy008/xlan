@@ -18,12 +18,13 @@ import (
 var httpc = &http.Client{Timeout: 30 * time.Second}
 
 type Info struct {
-	OK       bool   `json:"ok"`
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Platform string `json:"platform"`
-	Version  string `json:"version"`
-	Port     int    `json:"port"`
+	OK        bool   `json:"ok"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Platform  string `json:"platform"`
+	Version   string `json:"version"`
+	Port      int    `json:"port"`
+	UptimeSec int64  `json:"uptime_sec"`
 }
 
 func GetInfo(ctx context.Context, base string) (Info, error) {
@@ -283,4 +284,22 @@ func Watch(ctx context.Context, base string) (<-chan core.Event, error) {
 		}
 	}()
 	return ch, nil
+}
+
+// Shutdown 让对端（通常是自己）的服务优雅退出。
+func Shutdown(ctx context.Context, base string) error {
+	return postJSON(ctx, base+"/v1/shutdown", map[string]string{}, nil)
+}
+
+// Restart 请求服务重启。deferred 为 true 表示还有传输在跑，等服务空闲再重启。
+func Restart(ctx context.Context, base string) (deferred bool, inflight int64, err error) {
+	var out struct {
+		OK       bool  `json:"ok"`
+		Deferred bool  `json:"deferred"`
+		Inflight int64 `json:"inflight"`
+	}
+	if err := postJSON(ctx, base+"/v1/restart", map[string]string{}, &out); err != nil {
+		return false, 0, err
+	}
+	return out.Deferred, out.Inflight, nil
 }

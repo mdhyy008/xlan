@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"xlan/core"
@@ -26,8 +28,66 @@ type Server struct {
 	Disc      *discover.Discoverer
 	Pub       *pubtext.Broadcaster
 	Bus       *events.Bus
-	RecvDir   string
+	RecvDir   func() string
 	StartedAt time.Time
+
+	// Shutdown 用于让常驻服务优雅退出。
+	Shutdown func()
+	// RequestRestart 让服务重启（退出后拉起新进程）。
+	RequestRestart func()
+
+	pendingRestart int32
+
+	activityMu sync.Mutex
+	// activity 记录每个进行中的传输最后一次动的时间，用于判断能否重启。
+	activity map[string]int64
+}
+
+// busyWindow 是判断"还在传"的时间窗口：分块之间有间隔，不能看瞬时状态。
+const busyWindow = 5 * time.Minute
+
+func (s *Server) touch(id string) {
+	if id == "" {
+		return
+	}
+	s.activityMu.Lock()
+	if s.activity == nil {
+		s.activity = make(map[string]int64)
+	}
+	s.activity[id] = time.Now().UnixNano()
+	s.activityMu.Unlock()
+}
+
+func (s *Server) clear(id string) {
+	s.activityMu.Lock()
+	delete(s.activity, id)
+	s.activityMu.Unlock()
+}
+
+// transferCount 返回仍在进行的传输数量，顺手清掉过期记录。
+func (s *Server) transferCount() int {
+	s.activityMu.Lock()
+	defer s.activityMu.Unlock()
+	cut := time.Now().Add(-busyWindow).UnixNano()
+	n := 0
+	for id, ts := range s.activity {
+		if ts >= cut {
+			n++
+		} else {
+			delete(s.activity, id)
+		}
+	}
+	return n
+}
+
+// maybeRestart 在最后一个传输结束时，兑现被挂起的重启。
+func (s *Server) maybeRestart() {
+	if s.transferCount() > 0 {
+		return
+	}
+	if atomic.CompareAndSwapInt32(&s.pendingRestart, 1, 0) && s.RequestRestart != nil {
+		s.RequestRestart()
+	}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -46,6 +106,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /v1/offer/{id}/data", s.handlePutData)
 	mux.HandleFunc("PUT /v1/offer/{id}/file/{rel...}", s.handlePutFile)
 	mux.HandleFunc("POST /v1/offer/{id}/finish", s.handleFinish)
+	mux.HandleFunc("POST /v1/shutdown", localOnly(s.handleShutdown))
+	mux.HandleFunc("POST /v1/restart", localOnly(s.handleRestart))
 	return mux
 }
 
@@ -73,6 +135,21 @@ func localOnly(h http.HandlerFunc) http.HandlerFunc {
 		}
 		h(w, r)
 	}
+}
+
+// handleRestart 空闲就重启，有传输在跑就等它们跑完再重启。
+func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
+	if n := s.transferCount(); n > 0 {
+		atomic.StoreInt32(&s.pendingRestart, 1)
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "deferred": true, "inflight": n,
+		})
+		return
+	}
+	if s.RequestRestart != nil {
+		go s.RequestRestart()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deferred": false, "inflight": 0})
 }
 
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
@@ -329,4 +406,12 @@ func (s *Server) broadcastTargets() []*net.UDPAddr {
 		out = append(out, &net.UDPAddr{IP: ip, Port: core.PublicPort})
 	}
 	return out
+}
+
+// handleShutdown 让本机服务退出，仅限回环地址。
+func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	if s.Shutdown != nil {
+		go s.Shutdown()
+	}
 }

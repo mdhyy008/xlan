@@ -47,6 +47,7 @@ xlan recv <id> -o -   # 把内容管道出去
 | `xlan inbox accept\|reject <id>` | 处理待确认的文件 |
 | `xlan recv <id> [--out 路径] [-o -]` | 取出内容，`-` 表示 stdout |
 | `xlan trust add\|rm\|list` | 信任白名单 |
+| `xlan config [get\|set\|unset]` | 查看和修改配置 |
 | `xlan doctor` | 网络自检 |
 
 全局参数：`--json`、`--quiet`、`--timeout 60s`、`--config 目录`。
@@ -93,7 +94,7 @@ curl -N http://127.0.0.1:43003/v1/events
 
 ## 行为约定
 
-- 收到的文件落在 `~/Downloads/xlan`，重名自动加 ` (1)`，**绝不覆盖**
+- 收到的文件落在下载目录下的 `xlan`（安卓 `/sdcard/Download/xlan`，其余 `~/Downloads/xlan`），可用 `xlan config set recv_dir 路径` 改，重名自动加 ` (1)`，**绝不覆盖**
 - 发目录时先发结构清单，再逐个文件传输；保留空目录，不保留权限位，跳过符号链接
 - 目录里的每个文件单独校验 sha256，某个文件失败只影响它自己
 - 文件超过 1MB 分块上传，支持断点续传，落地前校验 sha256，`rename` 原子完成
@@ -101,6 +102,7 @@ curl -N http://127.0.0.1:43003/v1/events
 - 公共文本会等 600ms 收对方回执，零回执不等于失败，但会提示可能被 AP 隔离
 - 不信任的设备发文件会挂起，等你 `xlan inbox accept`；文本自动接收
 - 待确认的传输保留 24 小时，但发送方只等 `--timeout`（默认 60 秒）
+- 改配置后：服务空闲就立刻重启；有传输在跑就等它们跑完再重启，不打断传输
 
 ## 隐私与安全
 

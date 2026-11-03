@@ -46,7 +46,7 @@ func safeJoin(root, rel string) (string, error) {
 
 // createFolderRoot 在收件目录下建出目录树，返回根路径。
 func (s *Server) createFolderRoot(m core.Manifest) (string, error) {
-	root := uniqueDir(s.RecvDir, m.Root)
+	root := uniqueDir(s.RecvDir(), m.Root)
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return "", err
 	}
@@ -68,6 +68,8 @@ func (s *Server) createFolderRoot(m core.Manifest) (string, error) {
 func (s *Server) handlePutFile(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	rel := r.PathValue("rel")
+	s.touch(id)
+	defer s.touch(id)
 
 	it, ok, err := s.Store.GetItem(id)
 	if err != nil {
@@ -252,6 +254,8 @@ func (s *Server) handleFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(),
 		Data: map[string]any{"id": id, "status": string(core.StatusDone), "path": it.Path}})
+	s.clear(id)
+	s.maybeRestart()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "done": true, "path": it.Path})
 }
 

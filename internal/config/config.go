@@ -110,11 +110,20 @@ func (c *Config) Save(dir string) error {
 	return os.WriteFile(filepath.Join(dir, "config.json"), append(b, '\n'), 0o644)
 }
 
-// RecvDirPath 返回收件目录的绝对路径，默认 ~/Downloads/xlan。
+// DownloadsDir 返回本机默认的下载目录。
+// 安卓（含 Termux/proot）用 /sdcard/Download，其余平台用 ~/Downloads。
+func DownloadsDir() string {
+	if st, err := os.Stat("/sdcard/Download"); err == nil && st.IsDir() {
+		return "/sdcard/Download"
+	}
+	return filepath.Join(home(), "Downloads")
+}
+
+// RecvDirPath 返回收件目录的绝对路径，默认是下载目录下的 xlan。
 func (c *Config) RecvDirPath() string {
 	p := strings.TrimSpace(c.RecvDir)
 	if p == "" {
-		p = filepath.Join(home(), "Downloads", "xlan")
+		p = filepath.Join(DownloadsDir(), "xlan")
 	}
 	if p == "~" {
 		return home()

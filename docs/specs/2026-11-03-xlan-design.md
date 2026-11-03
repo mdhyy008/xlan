@@ -28,7 +28,7 @@
 - Linux/macOS：配置 `~/.config/xlan`，数据 `~/.local/share/xlan`，缓存 `~/.cache/xlan`
 - Windows：`%APPDATA%\xlan`、`%LOCALAPPDATA%\xlan`
 - 数据库：`<数据目录>/xlan.db`
-- 收件目录：默认 `~/Downloads/xlan`，配置可改
+- 收件目录：默认下载目录下的 `xlan`（安卓 `/sdcard/Download/xlan`，其余 `~/Downloads/xlan`），用 `xlan config set recv_dir` 改
 - 所有运行时文件都在上述目录，不写系统临时目录
 
 ## 4. 端口

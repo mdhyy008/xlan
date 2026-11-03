@@ -31,7 +31,7 @@ func TestSendOneDeliversFile(t *testing.T) {
 	b := &httpapi.Server{
 		Dev:  core.Device{ID: "self-b", Name: "B", Platform: "linux", Version: "test"},
 		Port: 43003, Store: st, Bus: events.New(),
-		RecvDir: recvDir, StartedAt: time.Now(),
+		RecvDir: func() string { return recvDir }, StartedAt: time.Now(),
 	}
 	ts := httptest.NewServer(b.Handler())
 	defer ts.Close()
@@ -99,7 +99,7 @@ func TestSendFolderDeliversTree(t *testing.T) {
 	b := &httpapi.Server{
 		Dev:  core.Device{ID: "self-b", Name: "B", Platform: "linux", Version: "test"},
 		Port: 43003, Store: st, Bus: events.New(),
-		RecvDir: recvDir, StartedAt: time.Now(),
+		RecvDir: func() string { return recvDir }, StartedAt: time.Now(),
 	}
 	ts := httptest.NewServer(b.Handler())
 	defer ts.Close()
