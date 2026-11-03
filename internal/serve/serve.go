@@ -63,13 +63,26 @@ func Run(ctx context.Context, cfgDir string) error {
 	defer ln.Close()
 
 	disc := discover.New(dev, port, st, bus)
-	if err := disc.Listen(net.IPv4zero, core.DiscoverPort); err != nil {
+	if err := bindUDP(func() error { return disc.Listen(net.IPv4zero, core.DiscoverPort) }); err != nil {
+		ln.Close()
+		if spawn.Find(context.Background(), cfg) != "" {
+			return nil // 重启交接：旧实例还占着端口，它会负责继续服务
+		}
 		return fmt.Errorf("绑定 UDP %d 失败: %w", core.DiscoverPort, err)
 	}
 	defer disc.Close()
 
-	pub, err := pubtext.Listen(net.IPv4zero, core.PublicPort, dev.ID, dev.Name)
-	if err != nil {
+	var pub *pubtext.Broadcaster
+	if err := bindUDP(func() error {
+		b, err := pubtext.Listen(net.IPv4zero, core.PublicPort, dev.ID, dev.Name)
+		if err == nil {
+			pub = b
+		}
+		return err
+	}); err != nil {
+		if spawn.Find(context.Background(), cfg) != "" {
+			return nil
+		}
 		return fmt.Errorf("绑定 UDP %d 失败: %w", core.PublicPort, err)
 	}
 	defer pub.Close()
@@ -129,8 +142,10 @@ func Run(ctx context.Context, cfgDir string) error {
 			shutdown(hs)
 			return nil
 		case <-restartCh:
-			// 先放掉监听端口，再拉新进程，避免新进程绑不上。
+			// 先放掉所有监听端口，再拉新进程，避免新进程绑不上。
 			shutdown(hs)
+			_ = disc.Close()
+			_ = pub.Close()
 			_ = spawn.RestartSelf(cfgDir)
 			return nil
 		case err := <-errCh:
@@ -158,4 +173,19 @@ func writeRuntime(dataDir string, port int, dev core.Device) {
 	b := fmt.Sprintf("{\"port\":%d,\"pid\":%d,\"id\":%q,\"name\":%q}\n",
 		port, os.Getpid(), dev.ID, dev.Name)
 	_ = os.WriteFile(runtimePath(dataDir), []byte(b), 0o644)
+}
+
+// bindUDP 在重启交接时端口可能还被旧进程占着，重试一小会儿。
+func bindUDP(fn func() error) error {
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
 }
