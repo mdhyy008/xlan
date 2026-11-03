@@ -40,6 +40,9 @@ func Run(ctx context.Context, cfgDir string) error {
 	}
 	defer st.Close()
 
+	// 清掉历史版本可能把本机当设备写进去的记录。
+	_ = st.DeletePeer(dev.ID)
+
 	bus := events.New()
 
 	// 端口即锁：谁先绑上谁就是服务。

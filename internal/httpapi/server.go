@@ -170,7 +170,13 @@ func (s *Server) handlePeers(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "peers": peers})
+	out := make([]core.Peer, 0, len(peers))
+	for _, p := range peers {
+		if p.ID != s.Dev.ID {
+			out = append(out, p)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "peers": out})
 }
 
 func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
@@ -185,15 +191,17 @@ func (s *Server) handleScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Query().Get("deep") == "1" {
-		extra := discover.ScanTCP(ctx, s.Store, s.Port, 400*time.Millisecond)
-		seen := map[string]bool{}
+		seen := map[string]bool{s.Dev.ID: true}
 		for _, p := range peers {
 			seen[p.ID] = true
 		}
-		for _, p := range extra {
-			if !seen[p.ID] {
-				peers = append(peers, p)
+		for _, p := range discover.ProbeTCP(ctx, s.Port, 400*time.Millisecond) {
+			if seen[p.ID] {
+				continue
 			}
+			seen[p.ID] = true
+			_ = s.Store.UpsertPeer(p)
+			peers = append(peers, p)
 		}
 	}
 	if peers == nil {

@@ -417,6 +417,7 @@ func (a *App) cmdSend(args []string) int {
 	}
 
 	failed := 0
+	lastCode := "ERROR"
 	for _, p := range targets {
 		var sendErr error
 		if isDir {
@@ -426,9 +427,10 @@ func (a *App) cmdSend(args []string) int {
 		}
 		if err := sendErr; err != nil {
 			failed++
+			lastCode = classify(err)
 			a.warnf("%s: %v", p.Name, err)
 			if a.JSON {
-				a.emit(map[string]any{"ok": false, "peer": p.Name, "code": classify(err), "msg": err.Error()})
+				a.emit(map[string]any{"ok": false, "peer": p.Name, "code": lastCode, "msg": err.Error()})
 			}
 		} else if a.JSON {
 			a.emit(map[string]any{"ok": true, "peer": p.Name, "id": p.ID, "size": st.Size()})
@@ -437,9 +439,25 @@ func (a *App) cmdSend(args []string) int {
 		}
 	}
 	if failed == len(targets) {
-		return core.ExitError
+		return exitForCode(lastCode)
 	}
 	return core.ExitOK
+}
+
+// exitForCode 把失败原因映射到约定好的退出码。
+func exitForCode(code string) int {
+	switch code {
+	case "DENIED":
+		return core.ExitDenied
+	case "TIMEOUT":
+		return core.ExitTimeout
+	case "CHECKSUM":
+		return core.ExitChecksum
+	case "NO_PEER":
+		return core.ExitNoPeer
+	default:
+		return core.ExitError
+	}
 }
 
 func (a *App) sendOne(ctx context.Context, peer core.Peer, src string, size int64) error {
@@ -649,7 +667,7 @@ func (a *App) cmdRecv(args []string) int {
 	}
 	it, err := client.GetItem(context.Background(), base, id)
 	if err != nil {
-		return a.fail("NOT_FOUND", core.ExitNoPeer, err.Error())
+		return a.fail("NOT_FOUND", core.ExitError, err.Error())
 	}
 
 	switch {
@@ -883,7 +901,9 @@ func classify(err error) string {
 	switch {
 	case strings.Contains(msg, "拒绝"):
 		return "DENIED"
-	case strings.Contains(msg, "超时") || strings.Contains(msg, "确认"):
+	case strings.Contains(msg, "CHECKSUM"), strings.Contains(msg, "checksum"):
+		return "CHECKSUM"
+	case strings.Contains(msg, "超时"), strings.Contains(msg, "确认"):
 		return "TIMEOUT"
 	default:
 		return "ERROR"

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"xlan/core"
-	"xlan/internal/store"
 )
 
 // ProbeTCP 是组播/广播被过滤时的兜底：并发探测本机所在 /24 网段的
@@ -82,15 +81,6 @@ func probeOne(ctx context.Context, client *http.Client, ip string, port int) (co
 		ID: info.ID, Name: info.Name, Addr: ip, Port: port,
 		Platform: info.Platform, LastSeen: time.Now().Unix(),
 	}, true
-}
-
-// ScanTCP 探测并写库，返回本轮新增/刷新的设备。
-func ScanTCP(ctx context.Context, st *store.Store, apiPort int, timeout time.Duration) []core.Peer {
-	peers := ProbeTCP(ctx, apiPort, timeout)
-	for _, p := range peers {
-		_ = st.UpsertPeer(p)
-	}
-	return peers
 }
 
 func localIPv4Nets() ([]*net.IPNet, error) {

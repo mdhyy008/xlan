@@ -223,3 +223,8 @@ func (s *Store) SetTrusted(id string, v bool) error {
 	_, err := s.db.Exec(`UPDATE peers SET trusted = ? WHERE id = ?`, n, id)
 	return err
 }
+
+func (s *Store) DeletePeer(id string) error {
+	_, err := s.db.Exec(`DELETE FROM peers WHERE id = ?`, id)
+	return err
+}
