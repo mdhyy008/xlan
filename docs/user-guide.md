@@ -241,6 +241,12 @@ xlan inbox accept 2
 xlan inbox cancel
 ```
 
+想一次清掉所有没收完的：
+
+```
+xlan inbox cancel --all
+```
+
 不用管也行——**5 分钟没有新数据会自动标记失败**。
 
 ### 人不在电脑前
@@ -320,6 +326,7 @@ xlan inbox                         看收到的东西
 xlan inbox accept [序号]           接收（只有一条时不用写序号）
 xlan inbox reject [序号]           拒收
 xlan inbox cancel [序号]           取消卡住的传输
+xlan inbox cancel --all            取消全部未完成的
 xlan trust add 名字                 以后这个人的东西直接收
 xlan config set recv_dir 路径       换收件目录
 xlan doctor                        出问题时自检

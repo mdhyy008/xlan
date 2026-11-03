@@ -113,6 +113,7 @@ func (a *App) usage() {
   xlan inbox --watch                实时跟随
   xlan inbox accept|reject [序号]  处理待确认的传输
   xlan inbox cancel [序号]         取消卡住的传输
+  xlan inbox cancel --all          取消全部未完成的传输
   xlan recv <id> [--out 路径] [-o -]  取出内容
   xlan trust add|rm <设备> | list   信任白名单
   xlan config [get|set|unset]       查看和修改配置
@@ -619,6 +620,7 @@ func (a *App) cmdInbox(args []string) int {
 	since := fs.Duration("since", 0, "只看这段时间之后")
 	watch := fs.Bool("watch", false, "实时跟随")
 	noWait := fs.Bool("no-wait", false, "接收后不等传完")
+	all := fs.Bool("all", false, "全部取消")
 	rest, err := parseInterspersed(fs, args)
 	if err != nil {
 		return core.ExitUsage
@@ -633,6 +635,9 @@ func (a *App) cmdInbox(args []string) int {
 	}
 	if len(rest) > 1 {
 		subID = rest[1]
+	}
+	if sub == "cancel" && *all {
+		return a.cancelAll()
 	}
 	if sub == "accept" || sub == "reject" || sub == "cancel" {
 		return a.decide(sub, subID, *noWait)
@@ -1658,4 +1663,60 @@ func (a *App) putWithRetry(fn func() error) error {
 		}
 	}
 	return err
+}
+
+// cancelAll 把所有还没结束的传输一次性取消。
+func (a *App) cancelAll() int {
+	base, code := a.requireService()
+	if code != 0 {
+		return code
+	}
+	ctx := context.Background()
+
+	items, err := client.Inbox(ctx, base, 500, 0)
+	if err != nil {
+		return a.fail("INBOX", core.ExitError, err.Error())
+	}
+
+	var targets []core.Item
+	for _, it := range items {
+		if it.Status == core.StatusPending || it.Status == core.StatusActive {
+			targets = append(targets, it)
+		}
+	}
+	if len(targets) == 0 {
+		if a.JSON {
+			a.emit(map[string]any{"ok": true, "canceled": 0})
+		} else {
+			fmt.Fprintln(a.Out, "没有未完成的传输。")
+		}
+		return core.ExitOK
+	}
+
+	done, failed := 0, 0
+	for _, it := range targets {
+		if err := client.Decision(ctx, base, it.ID, "cancel"); err != nil {
+			failed++
+			a.warnf("%s: %v", describeTarget(it), err)
+			continue
+		}
+		done++
+		if !a.JSON {
+			fmt.Fprintf(a.Out, "已取消 %s\n", describeTarget(it))
+		}
+	}
+
+	if a.JSON {
+		a.emit(map[string]any{"ok": failed == 0, "canceled": done, "failed": failed})
+	} else {
+		fmt.Fprintf(a.Out, "共取消 %d 个", done)
+		if failed > 0 {
+			fmt.Fprintf(a.Out, "，%d 个失败", failed)
+		}
+		fmt.Fprintln(a.Out)
+	}
+	if failed > 0 && done == 0 {
+		return core.ExitError
+	}
+	return core.ExitOK
 }

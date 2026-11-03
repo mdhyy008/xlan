@@ -63,7 +63,7 @@ xlan recv <id> -o -   # 把内容管道出去
 | `xlan inbox` | 收件箱，默认最新 20 条 |
 | `xlan inbox --watch` | 实时跟随 |
 | `xlan inbox accept\|reject [序号]` | 处理待确认的传输，只有一条时可不写 |
-| `xlan inbox cancel [序号]` | 取消卡住的传输 |
+| `xlan inbox cancel [序号\|--all]` | 取消卡住的传输，`--all` 全部取消 |
 | `xlan recv <id> [--out 路径] [-o -]` | 取出内容，`-` 表示 stdout |
 | `xlan trust add\|rm\|list` | 信任白名单 |
 | `xlan config [get\|set\|unset]` | 查看和修改配置 |
