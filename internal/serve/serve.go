@@ -98,6 +98,9 @@ func Run(ctx context.Context, cfgDir string) error {
 	writeRuntime(dataDir, port, dev)
 	defer os.Remove(runtimePath(dataDir))
 
+	fmt.Printf("xlan %s 已启动\n  设备  %s (%s)\n  接口  http://0.0.0.0:%d\n  发现  udp %d / 公共文本 udp %d\n  收件  %s\n",
+		core.Version, dev.Name, dev.ID, port, core.DiscoverPort, core.PublicPort, cfg.RecvDirPath())
+
 	errCh := make(chan error, 1)
 	go func() { errCh <- hs.Serve(ln) }()
 

@@ -44,6 +44,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/offer/{id}", s.handleGetOffer)
 	mux.HandleFunc("POST /v1/offer/{id}/decision", localOnly(s.handleDecision))
 	mux.HandleFunc("PUT /v1/offer/{id}/data", s.handlePutData)
+	mux.HandleFunc("PUT /v1/offer/{id}/file/{rel...}", s.handlePutFile)
+	mux.HandleFunc("POST /v1/offer/{id}/finish", s.handleFinish)
 	return mux
 }
 
@@ -246,11 +248,14 @@ func (s *Server) sendPublic(w http.ResponseWriter, r *http.Request, body string)
 	}
 
 	// 自己也留一份，收件箱里能看到"我说过什么"。
-	_ = s.Store.AddItem(core.Item{
+	it := core.Item{
 		ID: pkt.ID, Kind: core.KindText, FromID: s.Dev.ID, FromName: s.Dev.Name,
 		ToID: core.PublicTo, Channel: core.ChanPublic, Body: body,
 		Status: core.StatusDone, CreatedAt: pkt.Ts,
-	})
+	}
+	if err := s.Store.AddItem(it); err == nil {
+		s.Bus.Publish(core.Event{Type: core.EvItemNew, Ts: it.CreatedAt, Data: it})
+	}
 
 	resp := map[string]any{"ok": true, "channel": "public", "acked": acked}
 	if len(acked) == 0 {

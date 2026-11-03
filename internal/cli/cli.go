@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -368,9 +369,7 @@ func (a *App) cmdSend(args []string) int {
 	if err != nil {
 		return a.fail("NOT_FOUND", core.ExitError, err.Error())
 	}
-	if st.IsDir() {
-		return a.fail("IS_DIR", core.ExitUsage, "第一版不支持目录，先打包成 tar 再发")
-	}
+	isDir := st.IsDir()
 
 	base, code := a.ensure()
 	if code != 0 {
@@ -416,7 +415,13 @@ func (a *App) cmdSend(args []string) int {
 
 	failed := 0
 	for _, p := range targets {
-		if err := a.sendOne(ctx, p, src, st.Size()); err != nil {
+		var sendErr error
+		if isDir {
+			sendErr = a.sendFolder(ctx, p, src)
+		} else {
+			sendErr = a.sendOne(ctx, p, src, st.Size())
+		}
+		if err := sendErr; err != nil {
 			failed++
 			a.warnf("%s: %v", p.Name, err)
 			if a.JSON {
@@ -452,24 +457,10 @@ func (a *App) sendOne(ctx context.Context, peer core.Peer, src string, size int6
 	}
 	if !resp.Accepted {
 		a.warnf("等待 %s 确认…", peer.Name)
-		deadline := time.Now().Add(a.Timeout)
-		for time.Now().Before(deadline) {
-			time.Sleep(400 * time.Millisecond)
-			s, err := client.GetOffer(ctx, base, resp.ID)
-			if err != nil {
-				return err
-			}
-			switch s.Status {
-			case string(core.StatusActive):
-				goto upload
-			case string(core.StatusFailed), string(core.StatusExpired):
-				return errors.New("对方拒绝了")
-			}
+		if err := a.waitAccepted(ctx, base, resp.ID); err != nil {
+			return err
 		}
-		return errors.New("对方没有在超时前确认")
 	}
-
-upload:
 	f, err := os.Open(src)
 	if err != nil {
 		return err
@@ -587,12 +578,24 @@ func (a *App) watchInbox(ctx context.Context, base string) int {
 			if !ok {
 				return core.ExitOK
 			}
-			b, _ := json.Marshal(ev)
 			if a.JSON {
+				b, _ := json.Marshal(ev)
 				fmt.Fprintln(a.Out, string(b))
 				continue
 			}
-			fmt.Fprintf(a.Out, "[%s] %s\n", time.Unix(ev.Ts, 0).Format("15:04:05"), string(b))
+			switch ev.Type {
+			case core.EvItemNew:
+				if it, ok := decodeItem(ev.Data); ok {
+					fmt.Fprintln(a.Out, formatItem(it))
+					continue
+				}
+			case core.EvPeerOnline:
+				if p, ok := decodePeer(ev.Data); ok {
+					fmt.Fprintf(a.Out, "%s 上线了  %s\n", p.Name, p.Addr)
+					continue
+				}
+			}
+			fmt.Fprintf(a.Out, "[%s] %s\n", time.Unix(ev.Ts, 0).Format("15:04:05"), ev.Type)
 		case <-ctx.Done():
 			return core.ExitOK
 		}
@@ -911,6 +914,134 @@ func copyFile(src string, w io.Writer) error {
 	return err
 }
 
+// waitAccepted 等对方点确认，超时就放弃。
+func (a *App) waitAccepted(ctx context.Context, base, id string) error {
+	deadline := time.Now().Add(a.Timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(400 * time.Millisecond)
+		s, err := client.GetOffer(ctx, base, id)
+		if err != nil {
+			return err
+		}
+		switch s.Status {
+		case string(core.StatusActive), string(core.StatusDone):
+			return nil
+		case string(core.StatusFailed), string(core.StatusExpired):
+			return errors.New("对方拒绝了")
+		}
+	}
+	return errors.New("对方没有在超时前确认")
+}
+
+// sendFolder 先把目录结构作为 manifest 发过去，再逐个文件上传。
+func (a *App) sendFolder(ctx context.Context, peer core.Peer, root string) error {
+	m, err := buildManifest(root)
+	if err != nil {
+		return err
+	}
+	base := peer.BaseURL()
+	if base == "" {
+		return errors.New("这台设备没有可用地址")
+	}
+
+	resp, err := client.Offer(ctx, base, client.OfferReq{
+		FromID: a.self().ID, FromName: a.self().Name, ToID: peer.ID,
+		Kind: string(core.KindFolder), Name: m.Root, Size: m.TotalSize(), Manifest: &m,
+	})
+	if err != nil {
+		return err
+	}
+
+	if !resp.Accepted {
+		a.warnf("等待 %s 确认…", peer.Name)
+		if err := a.waitAccepted(ctx, base, resp.ID); err != nil {
+			return err
+		}
+	}
+
+	total := m.FileCount()
+	done := 0
+	for _, e := range m.Entries {
+		if e.Dir {
+			continue
+		}
+		src := filepath.Join(root, filepath.FromSlash(e.Rel))
+		if err := a.uploadFile(ctx, base, resp.ID, e.Rel, src, e.Size); err != nil {
+			return err
+		}
+		done++
+		if !a.Quiet {
+			fmt.Fprintf(a.Err, "\r%s  %d/%d  %s", peer.Name, done, total, e.Rel)
+		}
+	}
+	if !a.Quiet && total > 0 {
+		fmt.Fprintln(a.Err)
+	}
+	return client.FinishFolder(ctx, base, resp.ID)
+}
+
+func (a *App) uploadFile(ctx context.Context, base, id, rel, src string, size int64) error {
+	f, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	var off int64
+	for off < size {
+		n := int64(chunkSize)
+		if size-off < n {
+			n = size - off
+		}
+		if _, err := f.Seek(off, io.SeekStart); err != nil {
+			return err
+		}
+		if err := client.PutFileRange(ctx, base, id, rel, io.LimitReader(f, n), off, n, size); err != nil {
+			return err
+		}
+		off += n
+	}
+	return nil
+}
+
+// buildManifest 遍历目录，跳过符号链接，给每个文件算好大小和校验和。
+func buildManifest(root string) (core.Manifest, error) {
+	clean := filepath.Clean(root)
+	m := core.Manifest{Root: filepath.Base(clean)}
+	err := filepath.WalkDir(clean, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if p == clean {
+			return nil
+		}
+		rel, err := filepath.Rel(clean, p)
+		if err != nil {
+			return err
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if d.IsDir() {
+			m.Entries = append(m.Entries, core.FolderEntry{Rel: filepath.ToSlash(rel), Dir: true})
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		sum, err := fileSHA256(p)
+		if err != nil {
+			return err
+		}
+		m.Entries = append(m.Entries, core.FolderEntry{
+			Rel: filepath.ToSlash(rel), Size: info.Size(), SHA256: sum,
+		})
+		return nil
+	})
+	return m, err
+}
+
 func copyFileTo(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -924,4 +1055,28 @@ func copyFileTo(src, dst string) error {
 	defer out.Close()
 	_, err = io.Copy(out, in)
 	return err
+}
+
+func decodeItem(v any) (core.Item, bool) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return core.Item{}, false
+	}
+	var it core.Item
+	if err := json.Unmarshal(b, &it); err != nil || it.ID == "" {
+		return core.Item{}, false
+	}
+	return it, true
+}
+
+func decodePeer(v any) (core.Peer, bool) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return core.Peer{}, false
+	}
+	var p core.Peer
+	if err := json.Unmarshal(b, &p); err != nil || p.ID == "" {
+		return core.Peer{}, false
+	}
+	return p, true
 }

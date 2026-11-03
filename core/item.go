@@ -4,8 +4,9 @@ package core
 type Kind string
 
 const (
-	KindText Kind = "text"
-	KindFile Kind = "file"
+	KindText   Kind = "text"
+	KindFile   Kind = "file"
+	KindFolder Kind = "folder"
 )
 
 // Channel 区分私聊与公共。

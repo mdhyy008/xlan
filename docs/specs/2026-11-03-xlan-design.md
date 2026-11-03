@@ -15,7 +15,7 @@
 ## 2. 非目标（第一版）
 
 - 跨网中继、NAT 穿透
-- 目录双向同步、目录递归传输
+- 目录双向同步
 - TUI 界面（交互只用一个数字菜单）
 - 系统桌面通知
 - mDNS（留 `Provider` 接口，1.1 再插）
@@ -117,6 +117,8 @@ GET  /v1/info                    设备名、id、平台、能力、服务端口
 POST /v1/offer                   发起传输（文件或文本），返回 offer_id
 GET  /v1/offer/{id}              状态、已接收 offset（续传用）
 PUT  /v1/offer/{id}/data         流式上传，Content-Range 定位
+PUT  /v1/offer/{id}/file/{rel}   目录传输里的单个文件
+POST /v1/offer/{id}/finish       目录传完，接收方做完整性检查
 POST /v1/offer/{id}/decision     accept / reject
 GET  /v1/inbox                   JSON 列表（limit / since）
 GET  /v1/events                  SSE 事件流
@@ -126,6 +128,8 @@ GET  /v1/events                  SSE 事件流
 
 本地管理端点（`/v1/scan`、`/v1/text` 的广播分支、`/v1/inbox` 写操作）**只接受来自 127.0.0.1 / ::1 的连接**。
 
+**目录传输**：先发一份 manifest（目录结构 + 每个文件的大小与 sha256），接收方按结构建好目录树，然后逐个文件上传，最后 `/finish` 做一次全量校验。空目录由 manifest 里的目录条目还原；空文件由 `/finish` 补建；符号链接发送端直接跳过。
+
 ## 7. 数据模型
 
 SQLite（`modernc.org/sqlite`，纯 Go，可交叉编译）。
@@ -133,7 +137,7 @@ SQLite（`modernc.org/sqlite`，纯 Go，可交叉编译）。
 ```sql
 items(id TEXT PK, kind TEXT, from_id TEXT, from_name TEXT, to_id TEXT,
       channel TEXT, body TEXT, name TEXT, size INTEGER, sha256 TEXT,
-      status TEXT, path TEXT, created_at INTEGER)
+      status TEXT, path TEXT, manifest TEXT, created_at INTEGER)
 peers(id TEXT PK, name TEXT, addr TEXT, port INTEGER, platform TEXT,
       last_seen INTEGER, trusted INTEGER)
 ```

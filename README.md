@@ -26,6 +26,7 @@ xlan scan             # 看局域网里有谁
 xlan text "在吗"       # 公共消息，广播给所有人
 xlan text "在吗" --to mbp
 xlan send 报告.pdf --to mbp
+xlan send ~/照片 --to mbp   # 目录也行，保留目录结构
 xlan inbox            # 收件箱
 xlan recv <id> -o -   # 把内容管道出去
 ```
@@ -40,7 +41,7 @@ xlan recv <id> -o -   # 把内容管道出去
 | `xlan status` | 服务状态、端口、在线设备 |
 | `xlan serve [--detach]` | 前台跑服务 |
 | `xlan text <内容\|->` | 发文本，省略 `--to` 就是公共 |
-| `xlan send <文件\|->` | 发文件，`--to` 指定设备，`--all` 群发 |
+| `xlan send <文件\|目录\|->` | 发文件或目录，`--to` 指定设备，`--all` 群发 |
 | `xlan inbox` | 收件箱，默认最新 20 条 |
 | `xlan inbox --watch` | 实时跟随 |
 | `xlan inbox accept\|reject <id>` | 处理待确认的文件 |
@@ -93,6 +94,8 @@ curl -N http://127.0.0.1:43003/v1/events
 ## 行为约定
 
 - 收到的文件落在 `~/Downloads/xlan`，重名自动加 ` (1)`，**绝不覆盖**
+- 发目录时先发结构清单，再逐个文件传输；保留空目录，不保留权限位，跳过符号链接
+- 目录里的每个文件单独校验 sha256，某个文件失败只影响它自己
 - 文件超过 1MB 分块上传，支持断点续传，落地前校验 sha256，`rename` 原子完成
 - 公共文本走 UDP 广播，单包 1000 字节以内；超长自动降级为逐台 TCP 投递
 - 公共文本会等 600ms 收对方回执，零回执不等于失败，但会提示可能被 AP 隔离

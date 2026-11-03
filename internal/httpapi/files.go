@@ -37,6 +37,10 @@ func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "EMPTY_BODY", "text body is empty")
 		return
 	}
+	if kind == core.KindFolder && (req.Manifest == nil || req.Manifest.Root == "") {
+		writeErr(w, http.StatusBadRequest, "BAD_MANIFEST", "folder offer needs a manifest")
+		return
+	}
 
 	id := req.TransferID
 	if id == "" {
@@ -64,9 +68,32 @@ func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
 		Body: req.Body, Name: req.Name, Size: req.Size, SHA256: req.SHA256,
 		Status: status, CreatedAt: time.Now().Unix(),
 	}
+	if kind == core.KindFolder {
+		it.Name = req.Manifest.Root
+		it.Size = req.Manifest.TotalSize()
+	}
 	if err := s.Store.AddItem(it); err != nil {
 		writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
 		return
+	}
+	if kind == core.KindFolder {
+		raw, err := json.Marshal(req.Manifest)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "BAD_MANIFEST", err.Error())
+			return
+		}
+		if err := s.Store.SetManifest(id, string(raw)); err != nil {
+			writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
+			return
+		}
+		if accepted {
+			root, err := s.acceptFolder(it)
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, "FOLDER", err.Error())
+				return
+			}
+			it.Path = root
+		}
 	}
 	s.Bus.Publish(core.Event{Type: core.EvItemNew, Ts: it.CreatedAt, Data: it})
 
@@ -122,6 +149,16 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 
 	switch req.Action {
 	case "accept":
+		if it.Kind == core.KindFolder {
+			if _, err := s.acceptFolder(it); err != nil {
+				writeErr(w, http.StatusInternalServerError, "FOLDER", err.Error())
+				return
+			}
+			s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(),
+				Data: map[string]any{"id": id, "status": string(core.StatusActive)}})
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "active"})
+			return
+		}
 		if err := s.Store.UpdateItemStatus(id, core.StatusActive, it.Path); err != nil {
 			writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
 			return
@@ -321,6 +358,25 @@ func uniquePath(dir, name string) string {
 		}
 	}
 	return filepath.Join(dir, fmt.Sprintf("%s-%d%s", base, time.Now().UnixNano(), ext))
+}
+
+// uniqueDir 与 uniquePath 同理，但目录不加扩展名。
+func uniqueDir(dir, name string) string {
+	name = sanitizeName(name)
+	if name == "unnamed" {
+		name = "folder"
+	}
+	p := filepath.Join(dir, name)
+	if _, err := os.Stat(p); os.IsNotExist(err) {
+		return p
+	}
+	for i := 1; i < 10000; i++ {
+		cand := filepath.Join(dir, fmt.Sprintf("%s (%d)", name, i))
+		if _, err := os.Stat(cand); os.IsNotExist(err) {
+			return cand
+		}
+	}
+	return filepath.Join(dir, fmt.Sprintf("%s-%d", name, time.Now().UnixNano()))
 }
 
 var reservedNames = map[string]bool{

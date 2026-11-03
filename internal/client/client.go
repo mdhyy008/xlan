@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"time"
 
@@ -32,15 +33,16 @@ func GetInfo(ctx context.Context, base string) (Info, error) {
 }
 
 type OfferReq struct {
-	FromID     string `json:"from_id"`
-	FromName   string `json:"from_name"`
-	ToID       string `json:"to_id"`
-	Kind       string `json:"kind"`
-	Name       string `json:"name,omitempty"`
-	Size       int64  `json:"size,omitempty"`
-	SHA256     string `json:"sha256,omitempty"`
-	Body       string `json:"body,omitempty"`
-	TransferID string `json:"transfer_id,omitempty"`
+	FromID     string         `json:"from_id"`
+	FromName   string         `json:"from_name"`
+	ToID       string         `json:"to_id"`
+	Kind       string         `json:"kind"`
+	Name       string         `json:"name,omitempty"`
+	Size       int64          `json:"size,omitempty"`
+	SHA256     string         `json:"sha256,omitempty"`
+	Body       string         `json:"body,omitempty"`
+	TransferID string         `json:"transfer_id,omitempty"`
+	Manifest   *core.Manifest `json:"manifest,omitempty"`
 }
 
 type OfferResp struct {
@@ -208,6 +210,40 @@ func GetItem(ctx context.Context, base, id string) (core.Item, error) {
 
 func SetTrusted(ctx context.Context, base, id string, trusted bool) error {
 	return postJSON(ctx, base+"/v1/trust", map[string]any{"id": id, "trusted": trusted}, nil)
+}
+
+// PutFileRange 上传目录里的一个文件，rel 是相对路径。
+func PutFileRange(ctx context.Context, base, id, rel string, r io.Reader, start, n, total int64) error {
+	url := fmt.Sprintf("%s/v1/offer/%s/file/%s", base, id, escapeRel(rel))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, r)
+	if err != nil {
+		return err
+	}
+	req.ContentLength = n
+	req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+n-1, total))
+	resp, err := httpc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("upload %s failed: %s %s", rel, resp.Status, bytes.TrimSpace(b))
+	}
+	return nil
+}
+
+// FinishFolder 告诉接收方所有文件都传完了，让它做完整性检查。
+func FinishFolder(ctx context.Context, base, id string) error {
+	return postJSON(ctx, base+"/v1/offer/"+id+"/finish", map[string]string{}, nil)
+}
+
+func escapeRel(rel string) string {
+	parts := strings.Split(rel, "/")
+	for i, p := range parts {
+		parts[i] = neturl.PathEscape(p)
+	}
+	return strings.Join(parts, "/")
 }
 
 // Watch 订阅 SSE 事件流。

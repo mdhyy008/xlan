@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS items (
   sha256     TEXT,
   status     TEXT NOT NULL,
   path       TEXT,
+  manifest   TEXT,
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at DESC);
@@ -59,6 +60,8 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// 旧库补列，失败说明列已存在。
+	_, _ = db.Exec(`ALTER TABLE items ADD COLUMN manifest TEXT`)
 	return &Store{db: db}, nil
 }
 
@@ -142,6 +145,20 @@ func (s *Store) ListItems(limit int, since int64) ([]core.Item, error) {
 func (s *Store) UpdateItemStatus(id string, st core.Status, path string) error {
 	_, err := s.db.Exec(`UPDATE items SET status = ?, path = ? WHERE id = ?`, string(st), path, id)
 	return err
+}
+
+func (s *Store) SetManifest(id, manifest string) error {
+	_, err := s.db.Exec(`UPDATE items SET manifest = ? WHERE id = ?`, manifest, id)
+	return err
+}
+
+func (s *Store) GetManifest(id string) (string, error) {
+	var m sql.NullString
+	err := s.db.QueryRow(`SELECT manifest FROM items WHERE id = ?`, id).Scan(&m)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return m.String, err
 }
 
 func (s *Store) DeleteItem(id string) error {
