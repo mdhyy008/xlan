@@ -60,6 +60,7 @@ xlan recv <id> -o -   # 把内容管道出去
 | `xlan pause\|resume <id>` | 暂停 / 继续某个发送任务 |
 | `xlan log [-n 20]` | 收发记录 |
 | `xlan log clean --older-than 30d` | 清理收发记录 |
+| `xlan pin list\|forget [主机]` | 查看或清除已信任的证书指纹 |
 | `xlan autostart on\|off\|status` | 开机自启（Windows 注册表 / systemd / LaunchAgent） |
 | `xlan path on\|off\|status` | 把程序目录加进 PATH |
 | `xlan text <内容\|->` | 发文本，省略 `--to` 就是公共 |

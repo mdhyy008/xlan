@@ -16,6 +16,16 @@ type Config struct {
 	RecvDir  string `json:"recv_dir,omitempty"`
 	APIPorts []int  `json:"api_ports,omitempty"`
 	Threads  int    `json:"threads,omitempty"`
+	// TLS 为 nil 表示没设置过，默认开启。
+	TLS *bool `json:"tls,omitempty"`
+}
+
+// UseTLS 默认开启加密传输。
+func (c *Config) UseTLS() bool {
+	if c.TLS == nil {
+		return true
+	}
+	return *c.TLS
 }
 
 func Default() *Config {

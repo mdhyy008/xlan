@@ -25,6 +25,7 @@ import (
 	"xlan/internal/config"
 	"xlan/internal/discover"
 	"xlan/internal/install"
+	"xlan/internal/secure"
 	"xlan/internal/serve"
 	"xlan/internal/spawn"
 )
@@ -90,6 +91,8 @@ func Run(args []string) int {
 		return a.cmdLog(rest)
 	case "sends":
 		return a.cmdSends(rest)
+	case "pin":
+		return a.cmdPin(rest)
 	case "pause":
 		return a.cmdSignal(rest, true)
 	case "resume":
@@ -128,6 +131,7 @@ func (a *App) usage() {
   xlan recv <id> [--out 路径] [-o -]  取出内容
   xlan trust add|rm <设备> | list   信任白名单
   xlan sends                        正在进行的发送任务
+  xlan pin list|forget [主机]      查看/清除已信任的证书指纹
   xlan pause|resume <id>           暂停 / 继续某个发送任务
   xlan log [-n 20]                  收发记录
   xlan log clean [--older-than 30d] 清理收发记录
@@ -169,7 +173,26 @@ func (a *App) load() error {
 		return err
 	}
 	a.Cfg = cfg
+	a.setupSecure()
 	return nil
+}
+
+// setupSecure 按配置决定要不要走加密，并准备指纹库。
+func (a *App) setupSecure() {
+	if !a.Cfg.UseTLS() {
+		secure.Disable()
+		return
+	}
+	dataDir, err := config.DataDir()
+	if err != nil {
+		secure.Disable()
+		return
+	}
+	pins := secure.LoadPins(filepath.Join(dataDir, "pins.json"))
+	pins.OnNew = func(host, fp string) {
+		fmt.Fprintf(a.Err, "第一次连接 %s，已记住证书指纹 %s\n", host, fp[:16])
+	}
+	secure.Enable(pins)
 }
 
 func (a *App) emit(v any) {
@@ -199,8 +222,11 @@ func (a *App) warnf(format string, args ...any) {
 // requireService 只检查服务在不在，不会偷偷拉起来。
 // 需求是：必须自己敲 xlan serve，才允许有服务在跑。
 func (a *App) requireService() (string, int) {
-	base := spawn.Find(context.Background(), a.Cfg)
+	base, probeErr := spawn.FindErr(context.Background(), a.Cfg)
 	if base == "" {
+		if probeErr != nil {
+			return "", a.fail("TLS_MISMATCH", core.ExitError, probeErr.Error())
+		}
 		return "", a.fail("NO_SERVICE", core.ExitError,
 			"服务没有在运行。另开一个终端敲 `xlan serve`，它会一直在前台跑着。")
 	}
@@ -252,7 +278,7 @@ func (a *App) cmdStatus(args []string) int {
 		return a.fail("CONFIG", core.ExitError, err.Error())
 	}
 	ctx := context.Background()
-	base := spawn.Find(ctx, a.Cfg)
+	base, probeErr := spawn.FindErr(ctx, a.Cfg)
 
 	peers := []core.Peer{}
 	autoAccept := false
@@ -274,6 +300,9 @@ func (a *App) cmdStatus(args []string) int {
 		return core.ExitOK
 	}
 	fmt.Fprintf(a.Out, "服务： %s\n", orDash(base))
+	if base == "" && probeErr != nil {
+		fmt.Fprintf(a.Out, "原因： %s\n", probeErr.Error())
+	}
 	fmt.Fprintf(a.Out, "模式： %s\n", map[bool]string{true: "自动接收", false: "需要确认"}[autoAccept])
 	fmt.Fprintf(a.Out, "端口： %v\n", a.Cfg.APIPorts)
 	fmt.Fprintf(a.Out, "收件： %s\n", a.Cfg.RecvDirPath())
@@ -322,8 +351,12 @@ func (a *App) cmdServe(args []string) int {
 			return a.fail("SPAWN", core.ExitError, err.Error())
 		}
 		deadline := time.Now().Add(10 * time.Second)
+		var lastProbeErr error
 		for time.Now().Before(deadline) {
-			base := spawn.Find(ctx, a.Cfg)
+			base, probeErr := spawn.FindErr(ctx, a.Cfg)
+			if probeErr != nil {
+				lastProbeErr = probeErr
+			}
 			if base == "" {
 				time.Sleep(150 * time.Millisecond)
 				continue
@@ -336,6 +369,9 @@ func (a *App) cmdServe(args []string) int {
 					base, info.Name, a.Cfg.RecvDirPath())
 			}
 			return core.ExitOK
+		}
+		if lastProbeErr != nil {
+			return a.fail("SPAWN", core.ExitError, lastProbeErr.Error())
 		}
 		return a.fail("SPAWN", core.ExitError, "后台服务没有起来")
 	}
@@ -1607,6 +1643,7 @@ func (a *App) printConfig() {
 	fmt.Fprintf(a.Out, "name      %s\n", a.mustValue("name"))
 	fmt.Fprintf(a.Out, "api_ports %v\n", a.Cfg.APIPorts)
 	fmt.Fprintf(a.Out, "threads   %d\n", config.ClampThreads(a.Cfg.Threads))
+	fmt.Fprintf(a.Out, "tls       %s\n", map[bool]string{true: "on", false: "off"}[a.Cfg.UseTLS()])
 	fmt.Fprintf(a.Out, "配置      %s\n", filepath.Join(dir, "config.json"))
 }
 
@@ -1621,6 +1658,11 @@ func (a *App) configValue(key string) (string, bool) {
 		return a.self().Name, true
 	case "threads":
 		return fmt.Sprintf("%d", config.ClampThreads(a.Cfg.Threads)), true
+	case "tls":
+		if a.Cfg.UseTLS() {
+			return "on", true
+		}
+		return "off", true
 	}
 	return "", false
 }
@@ -1642,8 +1684,19 @@ func (a *App) applyConfig(key, val string) error {
 			return errors.New("threads 要填数字，比如 4")
 		}
 		a.Cfg.Threads = config.ClampThreads(n)
+	case "tls":
+		v := true
+		switch strings.ToLower(val) {
+		case "on", "true", "1", "yes":
+			v = true
+		case "off", "false", "0", "no":
+			v = false
+		default:
+			return errors.New("tls 只能是 on 或 off")
+		}
+		a.Cfg.TLS = &v
 	default:
-		return errors.New("可改的项：recv_dir、name、threads")
+		return errors.New("可改的项：recv_dir、name、threads、tls")
 	}
 	return nil
 }
@@ -2087,4 +2140,59 @@ func (a *App) cmdSignal(args []string, pause bool) int {
 		fmt.Fprintf(a.Out, "已%s %s\n", verb, e.ID)
 	}
 	return core.ExitOK
+}
+
+// cmdPin 查看或清除证书指纹。
+func (a *App) cmdPin(args []string) int {
+	fs := a.flags("pin")
+	rest, err := parseInterspersed(fs, args)
+	if err != nil {
+		return core.ExitUsage
+	}
+	if err := a.load(); err != nil {
+		return a.fail("CONFIG", core.ExitError, err.Error())
+	}
+	dataDir, err := config.DataDir()
+	if err != nil {
+		return a.fail("CONFIG", core.ExitError, err.Error())
+	}
+	pins := secure.LoadPins(filepath.Join(dataDir, "pins.json"))
+
+	action := "list"
+	if len(rest) > 0 {
+		action = rest[0]
+	}
+	switch action {
+	case "list":
+		m := pins.List()
+		if a.JSON {
+			a.emit(map[string]any{"ok": true, "pins": m})
+			return core.ExitOK
+		}
+		if len(m) == 0 {
+			fmt.Fprintln(a.Out, "还没有信任过任何设备。")
+			return core.ExitOK
+		}
+		for host, fp := range m {
+			fmt.Fprintf(a.Out, "%-24s %s\n", host, fp[:16])
+		}
+		return core.ExitOK
+	case "forget":
+		host := ""
+		if len(rest) > 1 {
+			host = rest[1]
+		}
+		if err := pins.Forget(host); err != nil {
+			return a.fail("PIN", core.ExitError, err.Error())
+		}
+		if a.JSON {
+			a.emit(map[string]any{"ok": true, "forgot": host})
+		} else if host == "" {
+			fmt.Fprintln(a.Out, "已清除全部证书指纹。")
+		} else {
+			fmt.Fprintf(a.Out, "已清除 %s 的指纹。\n", host)
+		}
+		return core.ExitOK
+	}
+	return a.fail("USAGE", core.ExitUsage, "用法：xlan pin list|forget [主机]")
 }

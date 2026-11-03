@@ -35,6 +35,8 @@ type Server struct {
 
 	// AutoAccept 为真时，任何人发来的文件都直接收下，不再等确认。
 	AutoAccept bool
+	// Fingerprint 是本机证书指纹，明文模式下为空。
+	Fingerprint string
 
 	// Shutdown 用于让常驻服务优雅退出。
 	Shutdown func()
@@ -494,6 +496,8 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 		"port":        s.Port,
 		"uptime_sec":  int64(time.Since(s.StartedAt).Seconds()),
 		"auto_accept": s.AutoAccept,
+		"tls":         s.Fingerprint != "",
+		"fingerprint": s.Fingerprint,
 	})
 }
 

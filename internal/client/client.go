@@ -10,12 +10,37 @@ import (
 	"net/http"
 	neturl "net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"xlan/core"
+	"xlan/internal/secure"
 )
 
-var httpc = &http.Client{Timeout: 30 * time.Second}
+var (
+	hcMu    sync.Mutex
+	hcCache *http.Client
+	hcTLS   bool
+	hcInit  bool
+)
+
+// hc 按当前加密开关返回 HTTP 客户端，开关变了会重建。
+func hc() *http.Client {
+	hcMu.Lock()
+	defer hcMu.Unlock()
+	tlsOn := secure.Enabled()
+	if hcInit && hcTLS == tlsOn {
+		return hcCache
+	}
+	c := &http.Client{Timeout: 30 * time.Second}
+	if tlsOn {
+		c.Transport = secure.Transport(secure.PinsOf())
+	}
+	hcCache, hcTLS, hcInit = c, tlsOn, true
+	return c
+}
+
+func urlOf(base string) string { return secure.Rewrite(base) }
 
 type Info struct {
 	OK         bool   `json:"ok"`
@@ -30,7 +55,7 @@ type Info struct {
 
 func GetInfo(ctx context.Context, base string) (Info, error) {
 	var out Info
-	err := getJSON(ctx, base+"/v1/info", &out)
+	err := getJSON(ctx, urlOf(base)+"/v1/info", &out)
 	return out, err
 }
 
@@ -61,7 +86,7 @@ type OfferResp struct {
 
 func Offer(ctx context.Context, base string, req OfferReq) (OfferResp, error) {
 	var out OfferResp
-	err := postJSON(ctx, base+"/v1/offer", req, &out)
+	err := postJSON(ctx, urlOf(base)+"/v1/offer", req, &out)
 	return out, err
 }
 
@@ -76,25 +101,25 @@ type OfferState struct {
 
 func GetOffer(ctx context.Context, base, id string) (OfferState, error) {
 	var out OfferState
-	err := getJSON(ctx, base+"/v1/offer/"+id, &out)
+	err := getJSON(ctx, urlOf(base)+"/v1/offer/"+id, &out)
 	return out, err
 }
 
 func Decision(ctx context.Context, base, id, action string) error {
 	body := map[string]string{"action": action}
-	return postJSON(ctx, base+"/v1/offer/"+id+"/decision", body, nil)
+	return postJSON(ctx, urlOf(base)+"/v1/offer/"+id+"/decision", body, nil)
 }
 
 // PutRange 上传 [start, start+n) 这一段，total 是文件总长。
 func PutRange(ctx context.Context, base, id string, r io.Reader, start, n, total int64) error {
-	url := fmt.Sprintf("%s/v1/offer/%s/data", base, id)
+	url := fmt.Sprintf("%s/v1/offer/%s/data", urlOf(base), id)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, r)
 	if err != nil {
 		return err
 	}
 	req.ContentLength = n
 	req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+n-1, total))
-	resp, err := httpc.Do(req)
+	resp, err := hc().Do(req)
 	if err != nil {
 		return err
 	}
@@ -118,12 +143,12 @@ type TextResp struct {
 func SendText(ctx context.Context, base, body, to string) (TextResp, error) {
 	var out TextResp
 	req := map[string]string{"body": body, "to": to}
-	err := postJSON(ctx, base+"/v1/text", req, &out)
+	err := postJSON(ctx, urlOf(base)+"/v1/text", req, &out)
 	return out, err
 }
 
 func Inbox(ctx context.Context, base string, limit int, since int64) ([]core.Item, error) {
-	url := fmt.Sprintf("%s/v1/inbox?limit=%d&since=%d", base, limit, since)
+	url := fmt.Sprintf("%s/v1/inbox?limit=%d&since=%d", urlOf(base), limit, since)
 	var out struct {
 		OK    bool        `json:"ok"`
 		Items []core.Item `json:"items"`
@@ -137,12 +162,12 @@ func Peers(ctx context.Context, base string) ([]core.Peer, error) {
 		OK    bool        `json:"ok"`
 		Peers []core.Peer `json:"peers"`
 	}
-	err := getJSON(ctx, base+"/v1/peers", &out)
+	err := getJSON(ctx, urlOf(base)+"/v1/peers", &out)
 	return out.Peers, err
 }
 
 func Scan(ctx context.Context, base string, deep bool) ([]core.Peer, error) {
-	url := base + "/v1/scan"
+	url := urlOf(base) + "/v1/scan"
 	if deep {
 		url += "?deep=1"
 	}
@@ -159,7 +184,7 @@ func getJSON(ctx context.Context, url string, out any) error {
 	if err != nil {
 		return err
 	}
-	resp, err := httpc.Do(req)
+	resp, err := hc().Do(req)
 	if err != nil {
 		return err
 	}
@@ -188,7 +213,7 @@ func postJSON(ctx context.Context, url string, body, out any) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := httpc.Do(req)
+	resp, err := hc().Do(req)
 	if err != nil {
 		return err
 	}
@@ -203,31 +228,43 @@ func postJSON(ctx context.Context, url string, body, out any) error {
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-var streamClient = &http.Client{}
+var (
+	streamClient = &http.Client{}
+	streamTLS    bool
+)
+
+func streamHTTP() *http.Client {
+	if secure.Enabled() {
+		streamClient.Transport = secure.Transport(secure.PinsOf())
+	} else {
+		streamClient.Transport = nil
+	}
+	return streamClient
+}
 
 func GetItem(ctx context.Context, base, id string) (core.Item, error) {
 	var out struct {
 		OK   bool      `json:"ok"`
 		Item core.Item `json:"item"`
 	}
-	err := getJSON(ctx, base+"/v1/item/"+id, &out)
+	err := getJSON(ctx, urlOf(base)+"/v1/item/"+id, &out)
 	return out.Item, err
 }
 
 func SetTrusted(ctx context.Context, base, id string, trusted bool) error {
-	return postJSON(ctx, base+"/v1/trust", map[string]any{"id": id, "trusted": trusted}, nil)
+	return postJSON(ctx, urlOf(base)+"/v1/trust", map[string]any{"id": id, "trusted": trusted}, nil)
 }
 
 // PutFileRange 上传目录里的一个文件，rel 是相对路径。
 func PutFileRange(ctx context.Context, base, id, rel string, r io.Reader, start, n, total int64) error {
-	url := fmt.Sprintf("%s/v1/offer/%s/file/%s", base, id, escapeRel(rel))
+	url := fmt.Sprintf("%s/v1/offer/%s/file/%s", urlOf(base), id, escapeRel(rel))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, url, r)
 	if err != nil {
 		return err
 	}
 	req.ContentLength = n
 	req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, start+n-1, total))
-	resp, err := httpc.Do(req)
+	resp, err := hc().Do(req)
 	if err != nil {
 		return err
 	}
@@ -241,7 +278,7 @@ func PutFileRange(ctx context.Context, base, id, rel string, r io.Reader, start,
 
 // FinishFolder 告诉接收方所有文件都传完了，让它做完整性检查。
 func FinishFolder(ctx context.Context, base, id string) error {
-	return postJSON(ctx, base+"/v1/offer/"+id+"/finish", map[string]string{}, nil)
+	return postJSON(ctx, urlOf(base)+"/v1/offer/"+id+"/finish", map[string]string{}, nil)
 }
 
 func escapeRel(rel string) string {
@@ -254,11 +291,11 @@ func escapeRel(rel string) string {
 
 // Watch 订阅 SSE 事件流。
 func Watch(ctx context.Context, base string) (<-chan core.Event, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/v1/events", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlOf(base)+"/v1/events", nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := streamClient.Do(req)
+	resp, err := streamHTTP().Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -293,7 +330,7 @@ func Watch(ctx context.Context, base string) (<-chan core.Event, error) {
 
 // Shutdown 让对端（通常是自己）的服务优雅退出。
 func Shutdown(ctx context.Context, base string) error {
-	return postJSON(ctx, base+"/v1/shutdown", map[string]string{}, nil)
+	return postJSON(ctx, urlOf(base)+"/v1/shutdown", map[string]string{}, nil)
 }
 
 // Restart 请求服务重启。deferred 为 true 表示还有传输在跑，等服务空闲再重启。
@@ -303,7 +340,7 @@ func Restart(ctx context.Context, base string) (deferred bool, inflight int64, e
 		Deferred bool  `json:"deferred"`
 		Inflight int64 `json:"inflight"`
 	}
-	if err := postJSON(ctx, base+"/v1/restart", map[string]string{}, &out); err != nil {
+	if err := postJSON(ctx, urlOf(base)+"/v1/restart", map[string]string{}, &out); err != nil {
 		return false, 0, err
 	}
 	return out.Deferred, out.Inflight, nil
@@ -326,7 +363,7 @@ func CleanInbox(ctx context.Context, base string, olderThanSec int64, withFiles,
 		"with_files":     withFiles,
 		"dry_run":        dryRun,
 	}
-	err := postJSON(ctx, base+"/v1/inbox/clean", body, &out)
+	err := postJSON(ctx, urlOf(base)+"/v1/inbox/clean", body, &out)
 	return out, err
 }
 
@@ -341,7 +378,7 @@ func History(ctx context.Context, base string, limit int) ([]core.TransferRecord
 		OK    bool                  `json:"ok"`
 		Items []core.TransferRecord `json:"items"`
 	}
-	err := getJSON(ctx, fmt.Sprintf("%s/v1/history?limit=%d", base, limit), &out)
+	err := getJSON(ctx, fmt.Sprintf("%s/v1/history?limit=%d", urlOf(base), limit), &out)
 	return out.Items, err
 }
 
@@ -351,6 +388,6 @@ func CleanHistory(ctx context.Context, base string, olderThanSec int64) (int, er
 		OK    bool `json:"ok"`
 		Count int  `json:"count"`
 	}
-	err := postJSON(ctx, base+"/v1/history/clean", map[string]any{"older_than_sec": olderThanSec}, &out)
+	err := postJSON(ctx, urlOf(base)+"/v1/history/clean", map[string]any{"older_than_sec": olderThanSec}, &out)
 	return out.Count, err
 }

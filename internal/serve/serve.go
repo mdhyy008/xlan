@@ -2,6 +2,7 @@ package serve
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"xlan/internal/events"
 	"xlan/internal/httpapi"
 	"xlan/internal/pubtext"
+	"xlan/internal/secure"
 	"xlan/internal/spawn"
 	"xlan/internal/store"
 )
@@ -33,6 +35,13 @@ func Run(ctx context.Context, cfgDir string, autoAccept bool) error {
 	if err != nil {
 		return err
 	}
+	// 加密开关要在任何探测之前定下来。
+	if cfg.UseTLS() {
+		secure.Enable(secure.LoadPins(filepath.Join(dataDir, "pins.json")))
+	} else {
+		secure.Disable()
+	}
+
 	dev, err := core.LoadDevice(dataDir, cfg.Name)
 	if err != nil {
 		return err
@@ -65,13 +74,27 @@ func Run(ctx context.Context, cfgDir string, autoAccept bool) error {
 		}
 	}
 	if ln == nil {
-		if base := spawn.Find(context.Background(), cfg); base != "" {
+		base, probeErr := spawn.FindErr(context.Background(), cfg)
+		if base != "" {
 			fmt.Printf("xlan 服务已经在运行了：%s\n不用再起一个。\n", base)
 			return nil
+		}
+		if probeErr != nil {
+			return probeErr
 		}
 		return errors.New("所有 API 端口都被占用了")
 	}
 	defer ln.Close()
+
+	fingerprint := ""
+	if cfg.UseTLS() {
+		cert, fp, err := secure.LoadOrCreateCert(dataDir)
+		if err != nil {
+			return fmt.Errorf("准备加密证书失败: %w", err)
+		}
+		fingerprint = fp
+		ln = tls.NewListener(ln, secure.ServerTLS(cert))
+	}
 
 	disc := discover.New(dev, port, st, bus)
 	if err := bindUDP(func() error { return disc.Listen(net.IPv4zero, core.DiscoverPort) }); err != nil {
@@ -124,10 +147,11 @@ func Run(ctx context.Context, cfgDir string, autoAccept bool) error {
 
 	srv := &httpapi.Server{
 		Dev: dev, Port: port, Store: st, Disc: disc, Pub: pub, Bus: bus,
-		RecvDir:    func() string { return recvDir },
-		StartedAt:  time.Now(),
-		AutoAccept: autoAccept,
-		Shutdown:   cancel,
+		RecvDir:     func() string { return recvDir },
+		StartedAt:   time.Now(),
+		AutoAccept:  autoAccept,
+		Fingerprint: fingerprint,
+		Shutdown:    cancel,
 		RequestRestart: func() {
 			select {
 			case restartCh <- struct{}{}:
@@ -149,6 +173,11 @@ func Run(ctx context.Context, cfgDir string, autoAccept bool) error {
 	fmt.Printf("  收件   %s\n", recvDir)
 	if autoAccept {
 		fmt.Printf("  模式   自动接收（任何人的文件都直接收下）\n")
+	}
+	if fingerprint != "" {
+		fmt.Printf("  加密   TLS（指纹 %s）\n", fingerprint[:16])
+	} else {
+		fmt.Printf("  加密   未启用（明文）\n")
 	}
 	fmt.Printf("  数据   %s\n", dataDir)
 	fmt.Printf("--------------------------------------------\n")
