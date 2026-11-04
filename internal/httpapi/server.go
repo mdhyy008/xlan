@@ -223,6 +223,7 @@ func (s *Server) ReapStale() int {
 		}
 		s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: now,
 			Data: map[string]any{"id": it.ID, "status": string(core.StatusFailed),
+				"kind": string(it.Kind), "from_id": it.FromID,
 				"reason": "stale", "name": it.Name, "size": it.Size}})
 		n++
 	}
@@ -296,6 +297,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/inbox", localOnly(s.handleInbox))
 	mux.HandleFunc("GET /v1/item/{id}", localOnly(s.handleGetItem))
 	mux.HandleFunc("POST /v1/inbox/clean", localOnly(s.handleClean))
+	mux.HandleFunc("POST /v1/cache/clean", localOnly(s.handleCacheClean))
 	mux.HandleFunc("DELETE /v1/item/{id}", localOnly(s.handleDeleteItem))
 	mux.HandleFunc("GET /v1/history", localOnly(s.handleHistory))
 	mux.HandleFunc("POST /v1/history", localOnly(s.handleAddHistory))

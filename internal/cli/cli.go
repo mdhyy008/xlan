@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"xlan/core"
+	"xlan/internal/cache"
 	"xlan/internal/client"
 	"xlan/internal/config"
 	"xlan/internal/discover"
@@ -31,6 +32,7 @@ import (
 	"xlan/internal/secure"
 	"xlan/internal/serve"
 	"xlan/internal/spawn"
+	"xlan/internal/store"
 )
 
 const chunkSize = 4 << 20
@@ -90,6 +92,8 @@ func Run(args []string) int {
 		return a.cmdDoctor(rest)
 	case "config":
 		return a.cmdConfig(rest)
+	case "cache":
+		return a.cmdCache(rest)
 	case "log":
 		return a.cmdLog(rest)
 	case "sends":
@@ -131,6 +135,7 @@ func (a *App) usage() {
   xlan inbox cancel --all          取消全部未完成的传输
   xlan inbox accept --all          接收全部待确认的传输
   xlan inbox clean [--older-than 30d] [--with-files]  清理旧记录
+  xlan cache clean [--older-than 30d] [--dry-run]     清理临时分片和旧收件箱记录
   xlan recv <id> [--out 路径] [-o -]  取出内容
   xlan trust add|rm <设备> | list   信任白名单
   xlan sends                        正在进行的发送任务
@@ -2331,6 +2336,75 @@ func (a *App) cmdClean(olderThan string, withFiles, dryRun bool) int {
 		fmt.Fprintf(a.Out, "，%d 个文件", resp.RemovedFiles)
 	}
 	fmt.Fprintln(a.Out)
+	return core.ExitOK
+}
+
+// cmdCache 清理缓存：未完成传输的临时分片和旧的已结束收件箱记录。
+func (a *App) cmdCache(args []string) int {
+	fs := a.flags("cache")
+	olderThan := fs.String("older-than", "30d", "清理多久之前的收件箱记录")
+	dryRun := fs.Bool("dry-run", false, "只看看会删什么")
+	rest, err := parseInterspersed(fs, args)
+	if err != nil {
+		return core.ExitUsage
+	}
+	if len(rest) == 0 || rest[0] != "clean" {
+		return a.fail("USAGE", core.ExitUsage, "用法：xlan cache clean [--older-than 30d] [--dry-run]")
+	}
+	if err := a.load(); err != nil {
+		return a.fail("CONFIG", core.ExitError, err.Error())
+	}
+	d, err := parseAge(*olderThan)
+	if err != nil {
+		return a.fail("AGE", core.ExitUsage, err.Error())
+	}
+	if base, _ := spawn.FindErr(context.Background(), a.Cfg); base != "" {
+		resp, err := client.CleanCache(context.Background(), base, int64(d.Seconds()), *dryRun)
+		if err != nil {
+			return a.fail("CACHE", core.ExitError, err.Error())
+		}
+		return a.printCacheResult(resp.DryRun, resp.Parts, resp.FreedBytes, resp.Records)
+	}
+
+	// 服务没起也能清：直接动程序目录里的数据库和收件目录。
+	dataDir, err := config.DataDir()
+	if err != nil {
+		return a.fail("CONFIG", core.ExitError, err.Error())
+	}
+	st, err := store.Open(filepath.Join(dataDir, "xlan.db"))
+	if err != nil {
+		return a.fail("CACHE", core.ExitError, err.Error())
+	}
+	defer st.Close()
+
+	parts, freed, err := cache.CleanParts(a.Cfg.RecvDirPath(), *dryRun, nil)
+	if err != nil {
+		return a.fail("CACHE", core.ExitError, err.Error())
+	}
+	records, err := cache.CleanRecords(st, time.Now().Unix()-int64(d.Seconds()), *dryRun, nil)
+	if err != nil {
+		return a.fail("CACHE", core.ExitError, err.Error())
+	}
+	return a.printCacheResult(*dryRun, parts, freed, records)
+}
+
+func (a *App) printCacheResult(dryRun bool, parts int, freed int64, records int) int {
+	if a.JSON {
+		a.emit(map[string]any{
+			"ok": true, "dry_run": dryRun,
+			"parts": parts, "freed_bytes": freed, "records": records,
+		})
+		return core.ExitOK
+	}
+	verb := "已删除"
+	if dryRun {
+		verb = "会删除"
+	}
+	fmt.Fprintf(a.Out, "%s %d 个临时分片（%s），%d 条收件箱记录\n",
+		verb, parts, humanBytes(freed), records)
+	if dryRun {
+		fmt.Fprintln(a.Out, "（--dry-run，没有改动）")
+	}
 	return core.ExitOK
 }
 

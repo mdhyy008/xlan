@@ -357,6 +357,26 @@ type CleanResp struct {
 	Items        []core.Item `json:"items,omitempty"`
 }
 
+// CacheCleanResp 是清理缓存的结果。
+type CacheCleanResp struct {
+	OK         bool  `json:"ok"`
+	DryRun     bool  `json:"dry_run,omitempty"`
+	Parts      int   `json:"parts"`
+	FreedBytes int64 `json:"freed_bytes"`
+	Records    int   `json:"records"`
+}
+
+// CleanCache 清掉临时分片和旧的已结束收件箱记录。
+func CleanCache(ctx context.Context, base string, olderThanSec int64, dryRun bool) (CacheCleanResp, error) {
+	var out CacheCleanResp
+	body := map[string]any{
+		"older_than_sec": olderThanSec,
+		"dry_run":        dryRun,
+	}
+	err := postJSON(ctx, urlOf(base)+"/v1/cache/clean", body, &out)
+	return out, err
+}
+
 // CleanInbox 清掉早于 olderThanSec 的记录，可选连文件一起删。
 func CleanInbox(ctx context.Context, base string, olderThanSec int64, withFiles, dryRun bool) (CleanResp, error) {
 	var out CleanResp

@@ -155,6 +155,20 @@
 `--with-files` 会真的删除收件目录里的文件，只删路径在该目录下的条目。
 `--dry-run` 只返回会删哪些，不动数据。
 
+### 2.5.4 `xlan cache clean [--older-than 30d] [--dry-run]`
+
+清理未完成传输的临时分片和已经结束的旧收件箱记录。
+
+```json
+{"ok":true,"dry_run":false,"parts":3,"freed_bytes":1258291,"records":5}
+```
+
+- `parts`：删除的临时分片数量；`freed_bytes`：释放的字节数
+- `records`：删除的已结束（`done` / `failed` / `expired`）收件箱记录数量
+- 只删收件目录 `.parts` 下停止超过 5 分钟的分片，正在传的不动；已收文件本体不删
+- `--dry-run` 只返回会删多少，不做改动
+- 服务没起也能用：CLI 会直接清本地数据库和 `.parts`，不需要先 `xlan serve`
+
 ### 2.6 `xlan inbox accept|reject [序号|id]`
 
 ```json
