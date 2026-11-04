@@ -1,3 +1,17 @@
 bin/
 *.part
 *.log
+
+# 运行时数据：设备身份、配置、证书与数据库，不应提交
+/id
+/config.json
+/pins.json
+/tls.crt
+/tls.key
+/xlan.db
+/xlan.db-*
+
+# 编译产物
+/xlan
+/xlan.exe
+/xlan_*
