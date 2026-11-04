@@ -45,7 +45,18 @@ func home() string {
 // 只有收件目录是可配置的，其余一律写在程序目录里。
 func Dir() (string, error) { return ExeDir() }
 
-func DataDir() (string, error) { return ExeDir() }
+var dataDirOverride string
+
+// SetDataDir 覆盖数据目录，供嵌入式宿主（如 Android AAR）使用。
+// 传空字符串恢复默认：可执行文件所在目录。
+func SetDataDir(dir string) { dataDirOverride = dir }
+
+func DataDir() (string, error) {
+	if dataDirOverride != "" {
+		return dataDirOverride, nil
+	}
+	return ExeDir()
+}
 
 // ExeDir 返回可执行文件所在的绝对目录。
 func ExeDir() (string, error) {
@@ -98,7 +109,7 @@ func legacyDataDir() string {
 // EnsureMigrated 把旧版本放在系统目录里的配置和数据搬进程序目录。
 // 只搬一次，新目录已经有数据库就跳过。
 func EnsureMigrated() error {
-	dst, err := ExeDir()
+	dst, err := DataDir()
 	if err != nil {
 		return err
 	}

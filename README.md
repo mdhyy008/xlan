@@ -8,13 +8,23 @@
 
 - [用户手册](docs/user-guide.md)：面向使用者的完整说明
 - [Agent / 脚本调用说明](docs/agent-guide.md)：命令契约、JSON 输出、退出码与事件流
+- [Android 集成](docs/android.md)：在 App 进程内跑服务的 gomobile AAR 手册
+
+## 目录
+
+- `cmd/xlan`：命令行入口
+- `core/`：协议与数据模型
+- `internal/`：服务、发现、传输、存储等实现
+- `mobile/`：Android gomobile 绑定
+- `docs/`：使用手册与接入说明
+- `bin/`：编译产物与运行时数据（不入库）
 
 ## 安装
 
 ```bash
 git clone https://github.com/mdhyy008/xlan.git
 cd xlan
-go build -o xlan ./cmd/xlan
+go build -o bin/ ./cmd/xlan
 ```
 
 想把「哪次构建」烧进二进制（推荐，之后 `xlan --version` 能直接看出来）：
@@ -22,7 +32,7 @@ go build -o xlan ./cmd/xlan
 ```bash
 COMMIT=$(git rev-parse --short HEAD)
 BUILT=$(TZ=CST-8 date '+%Y-%m-%d %H:%M')
-go build -trimpath -ldflags "-s -w -X xlan/core.Commit=$COMMIT -X 'xlan/core.BuiltAt=$BUILT'" -o xlan ./cmd/xlan
+go build -trimpath -ldflags "-s -w -X xlan/core.Commit=$COMMIT -X 'xlan/core.BuiltAt=$BUILT'" -o bin/ ./cmd/xlan
 ```
 
 ```console
@@ -30,14 +40,14 @@ $ xlan --version
 xlan 0.1.0 (a1b2c3d, 2026-11-04 00:14)
 ```
 
-**配置和数据都放在程序自己所在的目录**（`config.json`、`id`、`xlan.db`），不写系统目录，拷走整个文件夹就是完整迁移。只有收件目录可以改，默认是系统的下载目录。
+编译产物统一落在 `bin/`。**配置和数据也跟着程序放在同一个目录**（`bin/config.json`、`bin/id`、`bin/xlan.db`），不写系统目录，拷走整个 `bin/` 就是完整迁移。只有收件目录可以改，默认是系统的下载目录。
 
 交叉编译（纯 Go，含 SQLite，不需要 C 工具链），把上面 `go build` 换成对应目标即可：
 
 ```bash
-GOOS=windows GOARCH=amd64 go build -o xlan.exe ./cmd/xlan
-GOOS=darwin  GOARCH=arm64 go build -o xlan     ./cmd/xlan
-GOOS=linux   GOARCH=arm64 go build -o xlan     ./cmd/xlan
+GOOS=windows GOARCH=amd64 go build -o bin/xlan.exe ./cmd/xlan
+GOOS=darwin  GOARCH=arm64 go build -o bin/xlan     ./cmd/xlan
+GOOS=linux   GOARCH=arm64 go build -o bin/xlan     ./cmd/xlan
 ```
 
 ## 快速上手

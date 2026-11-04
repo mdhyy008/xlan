@@ -24,8 +24,39 @@ import (
 	"xlan/internal/store"
 )
 
+// Options 描述一次服务运行。零值等价于 Run(ctx, "", false)。
+type Options struct {
+	ConfigDir  string
+	AutoAccept bool
+	// RecvDir 非空时覆盖配置里的收件目录，嵌入式宿主用来指定私有目录。
+	RecvDir string
+	// Logf 非空时替代默认的 stdout 输出，宿主可以接到自己的日志里。
+	Logf func(format string, args ...any)
+}
+
+// ErrRestartRequested 表示需要重启。桌面端由 Run 换进程，
+// 嵌入式宿主可以在同一个进程里重新调用 RunWith。
+var ErrRestartRequested = errors.New("restart requested")
+
 // Run 是常驻服务的主体。所有 socket 都由它持有。
 func Run(ctx context.Context, cfgDir string, autoAccept bool) error {
+	err := RunWith(ctx, Options{ConfigDir: cfgDir, AutoAccept: autoAccept})
+	if errors.Is(err, ErrRestartRequested) {
+		// 桌面端换一个新进程，避免旧进程里残留的连接和状态。
+		_ = spawn.Start(cfgDir, autoAccept)
+		return nil
+	}
+	return err
+}
+
+// RunWith 与 Run 相同，但允许宿主注入收件目录和日志输出。
+func RunWith(ctx context.Context, opts Options) error {
+	cfgDir := opts.ConfigDir
+	autoAccept := opts.AutoAccept
+	logf := opts.Logf
+	if logf == nil {
+		logf = func(format string, args ...any) { fmt.Printf(format, args...) }
+	}
 	if err := config.EnsureMigrated(); err != nil {
 		return err
 	}
@@ -61,7 +92,7 @@ func Run(ctx context.Context, cfgDir string, autoAccept bool) error {
 
 	// 端口即锁：谁先绑上谁就是服务。已经有一个在跑就别再起。
 	if base := spawn.Find(context.Background(), cfg); base != "" {
-		fmt.Printf("xlan 服务已经在运行了：%s\n不用再起一个，直接用 xlan scan / send / text。\n", base)
+		logf("xlan 服务已经在运行了：%s\n不用再起一个，直接用 xlan scan / send / text。\n", base)
 		return nil
 	}
 	var (
@@ -78,7 +109,7 @@ func Run(ctx context.Context, cfgDir string, autoAccept bool) error {
 	if ln == nil {
 		base, probeErr := spawn.FindErr(context.Background(), cfg)
 		if base != "" {
-			fmt.Printf("xlan 服务已经在运行了：%s\n不用再起一个。\n", base)
+			logf("xlan 服务已经在运行了：%s\n不用再起一个。\n", base)
 			return nil
 		}
 		if probeErr != nil {
@@ -102,7 +133,7 @@ func Run(ctx context.Context, cfgDir string, autoAccept bool) error {
 	if err := bindUDP(func() error { return disc.Listen(net.IPv4zero, core.DiscoverPort) }); err != nil {
 		ln.Close()
 		if base := spawn.Find(context.Background(), cfg); base != "" {
-			fmt.Printf("xlan 服务已经在运行了：%s\n", base)
+			logf("xlan 服务已经在运行了：%s\n", base)
 			return nil
 		}
 		return fmt.Errorf("绑定 UDP %d 失败: %w", core.DiscoverPort, err)
@@ -118,7 +149,7 @@ func Run(ctx context.Context, cfgDir string, autoAccept bool) error {
 		return err
 	}); err != nil {
 		if base := spawn.Find(context.Background(), cfg); base != "" {
-			fmt.Printf("xlan 服务已经在运行了：%s\n", base)
+			logf("xlan 服务已经在运行了：%s\n", base)
 			return nil
 		}
 		return fmt.Errorf("绑定 UDP %d 失败: %w", core.PublicPort, err)
@@ -145,6 +176,9 @@ func Run(ctx context.Context, cfgDir string, autoAccept bool) error {
 
 	// 收件目录在启动时定下来，传输中途不会换地方，避免续传对不上。
 	recvDir := cfg.RecvDirPath()
+	if opts.RecvDir != "" {
+		recvDir = opts.RecvDir
+	}
 	restartCh := make(chan struct{}, 1)
 
 	srv := &httpapi.Server{
@@ -166,37 +200,37 @@ func Run(ctx context.Context, cfgDir string, autoAccept bool) error {
 	writeRuntime(dataDir, port, dev)
 	defer os.Remove(runtimePath(dataDir))
 
-	fmt.Printf("--------------- xlan 服务已启动 ---------------\n")
-	fmt.Printf("  版本   %s\n", core.VersionString())
-	fmt.Printf("  设备   %s (%s)\n", dev.Name, dev.ID)
-	fmt.Printf("  接口   http://0.0.0.0:%d\n", port)
+	logf("--------------- xlan 服务已启动 ---------------\n")
+	logf("  版本   %s\n", core.VersionString())
+	logf("  设备   %s (%s)\n", dev.Name, dev.ID)
+	logf("  接口   http://0.0.0.0:%d\n", port)
 	if ips := localIPv4s(); len(ips) > 0 {
 		addrs := make([]string, 0, len(ips))
 		for _, ip := range ips {
 			addrs = append(addrs, fmt.Sprintf("%s:%d", ip, port))
 		}
-		fmt.Printf("  内网   %s\n", strings.Join(addrs, "，"))
+		logf("  内网   %s\n", strings.Join(addrs, "，"))
 	}
-	fmt.Printf("  发现   udp %d\n", core.DiscoverPort)
-	fmt.Printf("  公共   udp %d\n", core.PublicPort)
-	fmt.Printf("  收件   %s\n", recvDir)
+	logf("  发现   udp %d\n", core.DiscoverPort)
+	logf("  公共   udp %d\n", core.PublicPort)
+	logf("  收件   %s\n", recvDir)
 	if autoAccept {
-		fmt.Printf("  模式   自动接收（任何人的文件都直接收下）\n")
+		logf("  模式   自动接收（任何人的文件都直接收下）\n")
 	}
 	if fingerprint != "" {
-		fmt.Printf("  加密   TLS（指纹 %s）\n", fingerprint[:16])
+		logf("  加密   TLS（指纹 %s）\n", fingerprint[:16])
 	} else {
-		fmt.Printf("  加密   未启用（明文）\n")
+		logf("  加密   未启用（明文）\n")
 	}
-	fmt.Printf("  数据   %s\n", dataDir)
-	fmt.Printf("--------------------------------------------\n")
-	fmt.Printf("按 Ctrl-C 停止。另开一个终端用 xlan scan / send / text。\n\n")
+	logf("  数据   %s\n", dataDir)
+	logf("--------------------------------------------\n")
+	logf("按 Ctrl-C 停止。另开一个终端用 xlan scan / send / text。\n\n")
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- hs.Serve(ln) }()
 
 	// 前台跑的时候，收到东西直接在终端说一声。
-	go watchIncoming(bus, runCtx, dev.ID)
+	go watchIncoming(bus, runCtx, dev.ID, logf)
 
 	// 定期清理对方断线后挂着的传输。
 	go func() {
@@ -208,7 +242,7 @@ func Run(ctx context.Context, cfgDir string, autoAccept bool) error {
 				return
 			case <-t.C:
 				if n := srv.ReapStale(); n > 0 {
-					fmt.Printf("清理了 %d 个长时间没有数据的传输\n", n)
+					logf("清理了 %d 个长时间没有数据的传输\n", n)
 				}
 			}
 		}
@@ -224,13 +258,12 @@ func Run(ctx context.Context, cfgDir string, autoAccept bool) error {
 			shutdown(hs)
 			return nil
 		case <-restartCh:
-			fmt.Println("配置有变更，正在重启服务…")
-			// 先放掉所有监听端口，再拉新进程，避免新进程绑不上。
+			logf("配置有变更，正在重启服务…\n")
+			// 先放掉所有监听端口，避免新实例绑不上。
 			shutdown(hs)
 			_ = disc.Close()
 			_ = pub.Close()
-			_ = spawn.Start(cfgDir, autoAccept)
-			return nil
+			return ErrRestartRequested
 		case err := <-errCh:
 			if errors.Is(err, http.ErrServerClosed) {
 				return nil
@@ -317,7 +350,7 @@ func bindUDP(fn func() error) error {
 }
 
 // watchIncoming 在前台终端里提示收到的东西，后台跑时输出到 /dev/null 无副作用。
-func watchIncoming(bus *events.Bus, ctx context.Context, selfID string) {
+func watchIncoming(bus *events.Bus, ctx context.Context, selfID string, logf func(string, ...any)) {
 	ch, cancel := bus.Subscribe()
 	defer cancel()
 	for {
@@ -344,15 +377,15 @@ func watchIncoming(bus *events.Bus, ctx context.Context, selfID string) {
 			switch ev.Type {
 			case core.EvItemNew:
 				if it.Status == core.StatusPending {
-					fmt.Printf("[%s] 收到 %s 的文件：%s（%s），等待确认 —— 执行 xlan inbox accept\n",
+					logf("[%s] 收到 %s 的文件：%s（%s），等待确认 —— 执行 xlan inbox accept\n",
 						ts, name, it.Name, core.FormatBytes(it.Size))
 				} else {
-					fmt.Printf("[%s] %s 发来 %s（%s），已自动接收\n",
+					logf("[%s] %s 发来 %s（%s），已自动接收\n",
 						ts, name, it.Name, core.FormatBytes(it.Size))
 				}
 			case core.EvItemUpdate:
 				if it.Status == core.StatusDone {
-					fmt.Printf("[%s] 已收完：%s → %s\n", ts, it.Name, it.Path)
+					logf("[%s] 已收完：%s → %s\n", ts, it.Name, it.Path)
 				}
 			}
 		}

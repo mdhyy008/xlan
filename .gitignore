@@ -15,3 +15,5 @@ bin/
 /xlan
 /xlan.exe
 /xlan_*
+/xlan.aar
+/xlan-sources.jar
