@@ -23,6 +23,11 @@ func safeJoin(root, rel string) (string, error) {
 	if rel == "" {
 		return "", errors.New("empty path")
 	}
+	// Unix 上以 "/" 开头的会被 IsAbs 拒掉；Windows 上 "/etc/passwd"、
+	// "C:/x"、"//server/share" 都不是 IsAbs，必须显式拦。
+	if strings.HasPrefix(rel, "/") || filepath.IsAbs(rel) || filepath.VolumeName(rel) != "" {
+		return "", fmt.Errorf("unsafe path: %q", rel)
+	}
 	clean := filepath.Clean(filepath.FromSlash(rel))
 	if clean == "." || clean == ".." || filepath.IsAbs(clean) ||
 		strings.HasPrefix(clean, ".."+string(os.PathSeparator)) {
@@ -183,7 +188,7 @@ func (s *Server) handlePutFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if err := os.Rename(part, dest); err != nil {
+	if err := renameWithRetry(part, dest); err != nil {
 		writeErr(w, http.StatusInternalServerError, "FS", err.Error())
 		return
 	}
@@ -256,20 +261,24 @@ func (s *Server) handleFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(),
 		Data: map[string]any{"id": id, "status": string(core.StatusDone),
+			"kind": string(it.Kind), "from_id": it.FromID,
 			"path": it.Path, "name": it.Name, "size": it.Size}})
 	s.clear(id)
 	s.clearProgress(id)
 	s.maybeRestart()
 
-	d := time.Now().Unix() - it.CreatedAt
-	if d < 0 {
-		d = 0
+	// 自己发给自己的自测不是真实接收，不记历史。
+	if it.FromID != s.Dev.ID {
+		d := time.Now().Unix() - it.CreatedAt
+		if d < 0 {
+			d = 0
+		}
+		_ = s.Store.AddHistory(core.TransferRecord{
+			Ts: time.Now().Unix(), Direction: "recv", PeerName: it.FromName,
+			Name: it.Name, Kind: string(it.Kind), Size: it.Size, Status: "done",
+			DurationMS: d * 1000,
+		})
 	}
-	_ = s.Store.AddHistory(core.TransferRecord{
-		Ts: time.Now().Unix(), Direction: "recv", PeerName: it.FromName,
-		Name: it.Name, Kind: string(it.Kind), Size: it.Size, Status: "done",
-		DurationMS: d * 1000,
-	})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "done": true, "path": it.Path})
 }
 

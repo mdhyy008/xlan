@@ -200,6 +200,7 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 		}
 		s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(),
 			Data: map[string]any{"id": id, "status": string(core.StatusFailed),
+				"kind": string(it.Kind), "from_id": it.FromID,
 				"name": it.Name, "size": it.Size}})
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "failed"})
 		return
@@ -220,6 +221,7 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 			}
 			s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(),
 				Data: map[string]any{"id": id, "status": string(core.StatusActive),
+					"kind": string(it.Kind), "from_id": it.FromID,
 					"name": it.Name, "size": it.Size}})
 			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "active"})
 			return
@@ -230,6 +232,7 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 		}
 		s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(),
 			Data: map[string]any{"id": id, "status": string(core.StatusActive),
+				"kind": string(it.Kind), "from_id": it.FromID,
 				"name": it.Name, "size": it.Size}})
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "active"})
 	case "reject":
@@ -241,6 +244,7 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 		}
 		s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(),
 			Data: map[string]any{"id": id, "status": string(core.StatusFailed),
+				"kind": string(it.Kind), "from_id": it.FromID,
 				"name": it.Name, "size": it.Size}})
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "failed"})
 	default:
@@ -287,12 +291,17 @@ func (s *Server) handlePutData(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "FS", err.Error())
 		return
 	}
-	defer f.Close()
 
 	// 按偏移直接写，这样多线程可以乱序传同一个文件。
-	n, err := io.Copy(&offsetWriter{f: f, off: start}, r.Body)
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, "WRITE", err.Error())
+	n, copyErr := io.Copy(&offsetWriter{f: f, off: start}, r.Body)
+	// Windows 不允许重命名仍被打开的文件，写完立刻关，别等 handler 返回。
+	closeErr := f.Close()
+	if copyErr != nil {
+		writeErr(w, http.StatusInternalServerError, "WRITE", copyErr.Error())
+		return
+	}
+	if closeErr != nil {
+		writeErr(w, http.StatusInternalServerError, "WRITE", closeErr.Error())
 		return
 	}
 	if start+int64(n) != end+1 {
@@ -333,6 +342,19 @@ func (w *offsetWriter) Write(p []byte) (int, error) {
 
 var ErrChecksum = errors.New("checksum mismatch")
 
+// renameWithRetry 在多线程分块时，别的块请求可能刚写完、还没关闭句柄，
+// Windows 会拒绝重命名。短暂重试，等它们关掉。
+func renameWithRetry(src, dst string) error {
+	var err error
+	for i := 0; i < 100; i++ {
+		if err = os.Rename(src, dst); err == nil {
+			return nil
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return err
+}
+
 func (s *Server) finalize(it core.Item, part string) error {
 	if it.SHA256 != "" {
 		got, err := fileSHA256(part)
@@ -351,7 +373,7 @@ func (s *Server) finalize(it core.Item, part string) error {
 		return err
 	}
 	final := uniquePath(dir, it.Name)
-	if err := os.Rename(part, final); err != nil {
+	if err := renameWithRetry(part, final); err != nil {
 		return err
 	}
 	if err := s.Store.UpdateItemStatus(it.ID, core.StatusDone, final); err != nil {
@@ -359,21 +381,25 @@ func (s *Server) finalize(it core.Item, part string) error {
 	}
 	s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(),
 		Data: map[string]any{"id": it.ID, "status": string(core.StatusDone),
+			"kind": string(it.Kind), "from_id": it.FromID,
 			"path": final, "name": it.Name, "size": it.Size}})
 	s.clear(it.ID)
 	s.clearProgress(it.ID)
 	s.clearRanges(it.ID)
 	s.maybeRestart()
 
-	d := time.Now().Unix() - it.CreatedAt
-	if d < 0 {
-		d = 0
+	// 自己发给自己的自测不是真实接收，不记历史。
+	if it.FromID != s.Dev.ID {
+		d := time.Now().Unix() - it.CreatedAt
+		if d < 0 {
+			d = 0
+		}
+		_ = s.Store.AddHistory(core.TransferRecord{
+			Ts: time.Now().Unix(), Direction: "recv", PeerName: it.FromName,
+			Name: it.Name, Kind: string(it.Kind), Size: it.Size, Status: "done",
+			DurationMS: d * 1000,
+		})
 	}
-	_ = s.Store.AddHistory(core.TransferRecord{
-		Ts: time.Now().Unix(), Direction: "recv", PeerName: it.FromName,
-		Name: it.Name, Kind: string(it.Kind), Size: it.Size, Status: "done",
-		DurationMS: d * 1000,
-	})
 	return nil
 }
 

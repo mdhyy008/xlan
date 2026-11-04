@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -85,16 +86,23 @@ func TestFilenameEncodingRoundTrip(t *testing.T) {
 	}
 	sort.Strings(got)
 
-	want := append([]string(nil), names...)
+	// Windows 文件系统不允许 " 和 *，落盘时会被 sanitizeName 换掉。
+	disk := append([]string(nil), names...)
+	if runtime.GOOS == "windows" {
+		for i, n := range disk {
+			disk[i] = strings.NewReplacer(`"`, "_", "*", "_").Replace(n)
+		}
+	}
+	want := append([]string(nil), disk...)
 	sort.Strings(want)
 
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("文件名不一致\n got: %q\nwant: %q", got, want)
 	}
-	for _, n := range names {
-		b, err := os.ReadFile(filepath.Join(gotDir, n))
+	for i, n := range names {
+		b, err := os.ReadFile(filepath.Join(gotDir, disk[i]))
 		if err != nil {
-			t.Fatalf("read %q: %v", n, err)
+			t.Fatalf("read %q: %v", disk[i], err)
 		}
 		if !bytes.Equal(b, contents[n]) {
 			t.Fatalf("内容不一致: %q", n)
