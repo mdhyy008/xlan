@@ -1,6 +1,9 @@
 package core
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 var (
 	// Version 是语义版本号。
@@ -13,9 +16,14 @@ var (
 // VersionString 返回带构建信息的版本串，比如
 // "0.1.0 (a1b2c3d, 2026-11-04 00:12)"。没注入时只返回版本号。
 func VersionString() string {
+	built := BuiltAt
+	// 老构建注入的是 2026-11-04T00:12，统一显示成 2026-11-04 00:12。
+	if t, err := time.Parse("2006-01-02T15:04", built); err == nil {
+		built = t.Format("2006-01-02 15:04")
+	}
 	switch {
-	case Commit != "" && BuiltAt != "":
-		return fmt.Sprintf("%s (%s, %s)", Version, Commit, BuiltAt)
+	case Commit != "" && built != "":
+		return fmt.Sprintf("%s (%s, %s)", Version, Commit, built)
 	case Commit != "":
 		return fmt.Sprintf("%s (%s)", Version, Commit)
 	default:

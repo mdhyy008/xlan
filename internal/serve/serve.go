@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"xlan/core"
@@ -169,6 +170,13 @@ func Run(ctx context.Context, cfgDir string, autoAccept bool) error {
 	fmt.Printf("  版本   %s\n", core.VersionString())
 	fmt.Printf("  设备   %s (%s)\n", dev.Name, dev.ID)
 	fmt.Printf("  接口   http://0.0.0.0:%d\n", port)
+	if ips := localIPv4s(); len(ips) > 0 {
+		addrs := make([]string, 0, len(ips))
+		for _, ip := range ips {
+			addrs = append(addrs, fmt.Sprintf("%s:%d", ip, port))
+		}
+		fmt.Printf("  内网   %s\n", strings.Join(addrs, "，"))
+	}
 	fmt.Printf("  发现   udp %d\n", core.DiscoverPort)
 	fmt.Printf("  公共   udp %d\n", core.PublicPort)
 	fmt.Printf("  收件   %s\n", recvDir)
@@ -188,7 +196,7 @@ func Run(ctx context.Context, cfgDir string, autoAccept bool) error {
 	go func() { errCh <- hs.Serve(ln) }()
 
 	// 前台跑的时候，收到东西直接在终端说一声。
-	go watchIncoming(bus, runCtx)
+	go watchIncoming(bus, runCtx, dev.ID)
 
 	// 定期清理对方断线后挂着的传输。
 	go func() {
@@ -240,6 +248,49 @@ func shutdown(hs *http.Server) {
 	_ = hs.Shutdown(ctx)
 }
 
+// localIPv4s 返回本机的局域网 IPv4 地址。有私有地址时优先只给私有地址，
+// 避免把 Docker、虚拟网卡之类的地址混进来。
+func localIPv4s() []string {
+	var all, private []string
+	seen := map[string]bool{}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip4 := ipnet.IP.To4()
+			if ip4 == nil || ip4.IsLinkLocalUnicast() {
+				continue
+			}
+			s := ip4.String()
+			if seen[s] {
+				continue
+			}
+			seen[s] = true
+			all = append(all, s)
+			if ip4.IsPrivate() {
+				private = append(private, s)
+			}
+		}
+	}
+	if len(private) > 0 {
+		return private
+	}
+	return all
+}
+
 func runtimePath(dataDir string) string {
 	return filepath.Join(dataDir, "runtime.json")
 }
@@ -266,7 +317,7 @@ func bindUDP(fn func() error) error {
 }
 
 // watchIncoming 在前台终端里提示收到的东西，后台跑时输出到 /dev/null 无副作用。
-func watchIncoming(bus *events.Bus, ctx context.Context) {
+func watchIncoming(bus *events.Bus, ctx context.Context, selfID string) {
 	ch, cancel := bus.Subscribe()
 	defer cancel()
 	for {
@@ -279,6 +330,10 @@ func watchIncoming(bus *events.Bus, ctx context.Context) {
 			}
 			it, ok := asItem(ev.Data)
 			if !ok || it.Kind == core.KindText {
+				continue
+			}
+			// doctor 自测是自己发给自己，不算“收到别人的文件”。
+			if it.FromID == selfID {
 				continue
 			}
 			ts := time.Now().Format("15:04:05")

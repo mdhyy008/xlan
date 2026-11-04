@@ -7,6 +7,8 @@
 ## 安装
 
 ```bash
+git clone https://github.com/mdhyy008/xlan.git
+cd xlan
 go build -o xlan ./cmd/xlan
 ```
 
@@ -14,13 +16,13 @@ go build -o xlan ./cmd/xlan
 
 ```bash
 COMMIT=$(git rev-parse --short HEAD)
-BUILT=$(TZ=Asia/Shanghai date '+%Y-%m-%dT%H:%M')
-go build -trimpath -ldflags "-s -w -X xlan/core.Commit=$COMMIT -X xlan/core.BuiltAt=$BUILT" -o xlan ./cmd/xlan
+BUILT=$(TZ=CST-8 date '+%Y-%m-%d %H:%M')
+go build -trimpath -ldflags "-s -w -X xlan/core.Commit=$COMMIT -X 'xlan/core.BuiltAt=$BUILT'" -o xlan ./cmd/xlan
 ```
 
 ```console
 $ xlan --version
-xlan 0.1.0 (a1b2c3d, 2026-11-04T00:14)
+xlan 0.1.0 (a1b2c3d, 2026-11-04 00:14)
 ```
 
 **配置和数据都放在程序自己所在的目录**（`config.json`、`id`、`xlan.db`），不写系统目录，拷走整个文件夹就是完整迁移。只有收件目录可以改，默认是系统的下载目录。
@@ -46,7 +48,7 @@ xlan inbox            # 收件箱
 xlan recv <id> -o -   # 把内容管道出去
 ```
 
-服务不用手动起：任何命令发现没有服务时，会自动在后台拉起一个。
+服务不会自动起：先在一个终端 `xlan serve`（或 `xlan serve -d` 放后台），其余命令都通过它工作。
 
 ## 命令
 
@@ -70,6 +72,7 @@ xlan recv <id> -o -   # 把内容管道出去
 | `xlan inbox accept\|reject [序号\|--all]` | 处理待确认的传输，`--all` 批量处理 |
 | `xlan inbox cancel [序号\|--all]` | 取消卡住的传输，`--all` 全部取消 |
 | `xlan inbox clean --older-than 30d` | 清理旧记录，加 `--with-files` 连文件一起删 |
+| `xlan cache clean [--older-than 30d] [--dry-run]` | 清理未完成传输的临时分片和旧收件箱记录，保留已收文件 |
 | `xlan recv <id> [--out 路径] [-o -]` | 取出内容，`-` 表示 stdout |
 | `xlan trust add\|rm\|list` | 信任白名单 |
 | `xlan config [get\|set\|unset]` | 查看和修改配置 |
@@ -144,14 +147,14 @@ curl -N http://127.0.0.1:43003/v1/events
 
 ## 隐私与安全
 
-- 默认明文 HTTP，只适合可信内网
+- 默认启用 TLS（自签证书），首次连接记住对方证书指纹，之后指纹变化会拒绝连接；`xlan pin list` 查看已记住的指纹，`xlan config set tls off` 可关闭加密
 - 接收端做了路径穿越防护（拒绝 `..`、绝对路径、Windows 保留名）
 - 本地管理接口（扫描、广播、收件箱写操作）只接受 127.0.0.1 连接
 
 ## 已验证范围
 
-Linux（arm64）实测通过，包含发现、公共文本、文件传输、校验落盘。
-Windows / macOS 只验证了交叉编译通过，未在真机运行。
+Linux（arm64）与 Windows（amd64）实测通过，包含发现、公共文本、文件传输、校验落盘、断点续传。
+macOS 只验证了交叉编译通过，未在真机运行。
 
 ## 开发
 
@@ -172,3 +175,7 @@ internal/serve      服务主体
 internal/spawn      按需拉起
 internal/cli        子命令
 ```
+
+## 许可证
+
+[MIT](LICENSE)
