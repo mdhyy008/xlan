@@ -46,7 +46,7 @@ func SetLogger(l Logger) {
 // Version 返回当前二进制版本，与 xlan --version 一致。
 func Version() string { return core.VersionString() }
 
-// GetBaseURL 返回本地 API 地址，例如 http://127.0.0.1:43003；未运行时为空。
+// GetBaseURL 返回本地 API 地址，例如 http://127.0.0.1:43503；未运行时为空。
 func GetBaseURL() string {
 	mu.Lock()
 	defer mu.Unlock()

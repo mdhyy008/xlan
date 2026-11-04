@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"xlan/core"
 )
 
 func TestLoadDefaultsWhenMissing(t *testing.T) {
@@ -12,7 +14,7 @@ func TestLoadDefaultsWhenMissing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(c.APIPorts) != 3 || c.APIPorts[0] != 43003 {
+	if len(c.APIPorts) != 3 || c.APIPorts[0] != core.APIBase {
 		t.Fatalf("bad default ports: %v", c.APIPorts)
 	}
 }

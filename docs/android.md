@@ -49,9 +49,9 @@ mobile.Mobile.setLogger(mobile.Logger)
 - `dataDir` 必须是应用私有可写目录（`filesDir`），设备身份、数据库、证书和配置都放这里。
 - `recvDir` 建议也传私有目录，为空则按配置（可能落到 `/sdcard/Download`）。
 - `autoAccept = true` 时不等待确认，直接接收所有人的文件。
-- 默认开启 TLS，`start` 返回 `https://127.0.0.1:43003`；只有配置里关了 TLS 才是 `http://`。
+- 默认开启 TLS，`start` 返回 `https://127.0.0.1:43503`；只有配置里关了 TLS 才是 `http://`。
 - `start` 会阻塞到服务可访问，**不要在 UI 线程调用**；重复调用直接返回现有地址。
-- 服务占用的端口固定：发现 UDP `43001`、公共消息 UDP `43002`、本地 API `43003`（被占用时顺延 43004、43005）。
+- 服务占用的端口固定：发现 UDP `43501`、公共消息 UDP `43502`、本地 API `43503`（被占用时顺延 43504、43505）。
 
 ## 3. 生命周期：放在前台 Service 里
 
@@ -506,7 +506,7 @@ fun uploadFile(client: OkHttpClient, peerBase: String, id: String, file: File) {
 
 ## 9. 常见问题
 
-**`start` 返回超时**：8 秒内服务没有可访问。看 `Mobile.setLogger` 的输出，常见原因是端口 43003–43005 被占、数据目录不可写，或同一设备已经跑着另一份服务。
+**`start` 返回超时**：8 秒内服务没有可访问。看 `Mobile.setLogger` 的输出，常见原因是端口 43503–43505 被占、数据目录不可写，或同一设备已经跑着另一份服务。
 
 **扫描不到设备**：先确认两台设备在同一个网段；关掉 Wi‑Fi 的客户端隔离；确认已获取 `MulticastLock`；仍然不行就调 `/v1/scan?deep=1`。
 

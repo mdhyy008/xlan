@@ -48,7 +48,7 @@
 ### 2.0 `xlan serve [-d]` / `xlan stop`
 
 ```json
-{"ok":true,"base":"http://127.0.0.1:43003","port":43003,"detached":true}
+{"ok":true,"base":"http://127.0.0.1:43503","port":43503,"detached":true}
 ```
 
 - `xlan serve` 前台跑，占住终端，Ctrl-C 停；收到文件时终端会打印一行提示
@@ -74,7 +74,7 @@
 发现局域网设备。先返回缓存（立即），再刷新。
 
 ```json
-{"ok":true,"peers":[{"id":"a1b2c3d4e5f60718","name":"mbp","addr":"10.0.0.9","port":43003,"platform":"darwin","last_seen":1730000000,"trusted":false}]}
+{"ok":true,"peers":[{"id":"a1b2c3d4e5f60718","name":"mbp","addr":"10.0.0.9","port":43503,"platform":"darwin","last_seen":1730000000,"trusted":false}]}
 ```
 
 - `--deep`：额外并发探测本机 /24 网段的 HTTP 端口，**约 4 秒**，但在组播被广播过滤的网络里是唯一能发现设备的手段
@@ -86,7 +86,7 @@
 服务是否在跑、端口、在线设备、收件目录。
 
 ```json
-{"ok":true,"running":true,"base":"http://127.0.0.1:43003","ports":[43003,43004,43005],"recv_dir":"/sdcard/Download/xlan","peers":[]}
+{"ok":true,"running":true,"base":"http://127.0.0.1:43503","ports":[43503,43504,43505],"recv_dir":"/sdcard/Download/xlan","peers":[]}
 ```
 
 `running:false` 时 `base` 为空。
@@ -244,7 +244,7 @@ agent 建议直接用完整 `id`，不要依赖序号——列表会随新消息
 SSE，比解析 CLI 输出稳定。
 
 ```bash
-curl -N http://127.0.0.1:43003/v1/events
+curl -N http://127.0.0.1:43503/v1/events
 ```
 
 每行 `data: {json}`：
@@ -263,7 +263,7 @@ curl -N http://127.0.0.1:43003/v1/events
 
 ## 4. 本地 HTTP API
 
-服务监听 `127.0.0.1:43003`（被占用时顺延到 43004、43005）。比 CLI 更细粒度，适合常驻程序。
+服务监听 `127.0.0.1:43503`（被占用时顺延到 43504、43505）。比 CLI 更细粒度，适合常驻程序。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -306,7 +306,7 @@ echo "$out" | jq -r '.acked[]?'       # 空表示没人应答
 xlan trust add mbp
 
 # 订阅事件，落盘后处理
-curl -sN http://127.0.0.1:43003/v1/events |
+curl -sN http://127.0.0.1:43503/v1/events |
   grep --line-buffered '^data: ' |
   sed 's/^data: //' |
   jq -c 'select(.type=="item.update" and .data.status=="done")' |

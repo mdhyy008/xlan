@@ -99,9 +99,9 @@ xlan recv <id> -o -   # 把内容管道出去
 
 | 端口 | 协议 | 用途 |
 |---|---|---|
-| 43001 | UDP | 发现广播 |
-| 43002 | UDP | 公共文本广播 + 回执 |
-| 43003–43005 | TCP | HTTP API，被占用时顺延 |
+| 43501 | UDP | 发现广播 |
+| 43502 | UDP | 公共文本广播 + 回执 |
+| 43503–43505 | TCP | HTTP API，被占用时顺延 |
 
 TCP 与 UDP 端口空间独立，可以同号。
 
@@ -114,7 +114,7 @@ $ xlan text "hi" --json
 {"acked":["mbp"],"channel":"public","ok":true}
 
 $ xlan scan --json
-{"ok":true,"peers":[{"id":"a1b2...","name":"mbp","addr":"10.0.0.9","port":43003,...}]}
+{"ok":true,"peers":[{"id":"a1b2...","name":"mbp","addr":"10.0.0.9","port":43503,...}]}
 ```
 
 退出码：
@@ -132,7 +132,7 @@ $ xlan scan --json
 事件流（给长驻程序用，比解析 CLI 输出更稳）：
 
 ```bash
-curl -N http://127.0.0.1:43003/v1/events
+curl -N http://127.0.0.1:43503/v1/events
 ```
 
 ## 行为约定

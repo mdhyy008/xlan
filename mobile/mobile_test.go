@@ -2,20 +2,22 @@ package mobile
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"xlan/core"
 	"xlan/internal/config"
 	"xlan/internal/spawn"
 )
 
 func TestStartStop(t *testing.T) {
 	// 本机已经有 xlan 在跑时跳过，避免抢固定端口。
-	l, err := net.ListenPacket("udp4", ":43001")
+	l, err := net.ListenPacket("udp4", fmt.Sprintf(":%d", core.DiscoverPort))
 	if err != nil {
-		t.Skip("UDP 43001 已被占用，跳过")
+		t.Skipf("UDP %d 已被占用，跳过", core.DiscoverPort)
 	}
 	l.Close()
 

@@ -12,7 +12,7 @@ import (
 )
 
 // Broadcaster 负责公共文本的 UDP 广播与回执收集。
-// 一个进程只应有一个实例，它独占 43002 端口。
+// 一个进程只应有一个实例，它独占 43502 端口。
 type Broadcaster struct {
 	selfID   string
 	selfName string

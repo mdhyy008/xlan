@@ -2,9 +2,9 @@ package core
 
 // 网络与协议常量。
 const (
-	DiscoverPort  = 43001
-	PublicPort    = 43002
-	APIBase       = 43003
+	DiscoverPort  = 43501
+	PublicPort    = 43502
+	APIBase       = 43503
 	APISlots      = 3
 	MaxPacket     = 1200
 	MaxPublicBody = 1000
