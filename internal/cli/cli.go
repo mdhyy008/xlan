@@ -51,6 +51,9 @@ type App struct {
 	limiter *bucket
 	pause   *pauser
 
+	// outMu 让并发上传时进度行和结果行不会写串。
+	outMu sync.Mutex
+
 	// Dev 缓存本机身份；测试里可直接注入。
 	Dev core.Device
 }
@@ -208,6 +211,8 @@ func (a *App) emit(v any) {
 	if err != nil {
 		return
 	}
+	a.outMu.Lock()
+	defer a.outMu.Unlock()
 	fmt.Fprintln(a.Out, string(b))
 }
 
@@ -224,6 +229,8 @@ func (a *App) warnf(format string, args ...any) {
 	if a.Quiet {
 		return
 	}
+	a.outMu.Lock()
+	defer a.outMu.Unlock()
 	fmt.Fprintf(a.Err, format+"\n", args...)
 }
 
@@ -569,7 +576,10 @@ func (a *App) cmdSend(args []string) int {
 	if code != 0 {
 		return code
 	}
-	ctx := context.Background()
+	// Ctrl-C 时先自己把已经建好的 offer 撤掉，对端马上就能看到
+	// 「对方已取消」，不用干等十分钟过期。
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
 	peers, err := client.Peers(ctx, base)
 	if err != nil {
 		return a.fail("PEERS", core.ExitError, err.Error())
@@ -628,42 +638,71 @@ func (a *App) cmdSend(args []string) int {
 		}
 	}
 
-	total := 0
-	failed := 0
-	lastCode := "ERROR"
+	tasks := make([]*sendTask, 0, len(sources)*len(targets))
 	for _, srcIt := range sources {
 		for _, p := range targets {
-			total++
-			var sendErr error
-			if srcIt.isDir {
-				sendErr = a.sendFolder(ctx, p, srcIt.path)
-			} else {
-				sendErr = a.sendOne(ctx, p, srcIt.path, srcIt.size)
-			}
-			name := filepath.Base(srcIt.path)
-			if recErr := client.AddHistory(ctx, base, core.TransferRecord{
-				Ts: time.Now().Unix(), Direction: "send", PeerName: p.Name,
-				Name: name, Kind: map[bool]string{true: "folder", false: "file"}[srcIt.isDir],
-				Size: srcIt.size, Status: map[bool]string{true: "done", false: "failed"}[sendErr == nil],
-			}); recErr != nil {
-				a.warnf("记录发送日志失败: %v", recErr)
-			}
-			if err := sendErr; err != nil {
-				failed++
-				lastCode = classify(err)
-				a.warnf("%s: %v", name, err)
-				if a.JSON {
-					a.emit(map[string]any{"ok": false, "file": name, "peer": p.Name, "code": lastCode, "msg": err.Error()})
-				}
-			} else if a.JSON {
-				a.emit(map[string]any{"ok": true, "file": name, "peer": p.Name, "id": p.ID, "size": srcIt.size})
-			} else if len(sources) == 1 {
-				fmt.Fprintf(a.Out, "已发送给 %s\n", p.Name)
-			} else {
-				fmt.Fprintf(a.Out, "已发送 %s → %s\n", name, p.Name)
-			}
+			tasks = append(tasks, &sendTask{
+				src: srcIt.path, name: filepath.Base(srcIt.path),
+				size: srcIt.size, isDir: srcIt.isDir, peer: p,
+			})
 		}
 	}
+
+	// 阶段一：先把整批文件的 offer 全部发过去，对端一次就能看到所有文件。
+	var failedMu sync.Mutex
+	total := len(tasks)
+	failed := 0
+	lastCode := "ERROR"
+	ready := make([]*sendTask, 0, total)
+	for _, t := range tasks {
+		if err := a.offerTask(ctx, t); err != nil {
+			if ctx.Err() == nil {
+				a.reportTask(ctx, base, t, err, len(sources) == 1)
+			}
+			failed++
+			lastCode = classify(err)
+			continue
+		}
+		if t.done {
+			a.reportTask(ctx, base, t, nil, len(sources) == 1)
+			continue
+		}
+		ready = append(ready, t)
+	}
+
+	// 阶段二：最多三个文件同时上传，其余排队等空位。
+	slots := make(chan struct{}, 3)
+	var wg sync.WaitGroup
+	for _, t := range ready {
+		wg.Add(1)
+		go func(t *sendTask) {
+			defer wg.Done()
+			err := a.runTask(ctx, t, slots)
+			if err != nil {
+				failedMu.Lock()
+				failed++
+				lastCode = classify(err)
+				failedMu.Unlock()
+			}
+			if ctx.Err() == nil {
+				a.reportTask(ctx, base, t, err, len(sources) == 1)
+			}
+		}(t)
+	}
+	wg.Wait()
+
+	// 被中断时，告诉每个已经建好 offer 的对端这批不发了。
+	if ctx.Err() != nil {
+		cancelCtx, stopCancel := context.WithTimeout(context.Background(), 3*time.Second)
+		for _, t := range tasks {
+			if t.id == "" || t.done {
+				continue
+			}
+			_ = client.DecisionBy(cancelCtx, t.base, t.id, "cancel", "sender")
+		}
+		stopCancel()
+	}
+
 	if failed == total {
 		return exitForCode(lastCode)
 	}
@@ -686,55 +725,228 @@ func exitForCode(code string) int {
 	}
 }
 
-func (a *App) sendOne(ctx context.Context, peer core.Peer, src string, size int64) error {
-	base := peer.BaseURL()
+// sendTask 是一次发送里最小的单位：一个文件或一个目录发给一台设备。
+type sendTask struct {
+	src       string
+	name      string
+	size      int64
+	isDir     bool
+	peer      core.Peer
+	base      string
+	id        string
+	accepted  bool
+	done      bool
+	manifest  *core.Manifest
+	doneFiles map[string]bool
+}
+
+// offerTask 只负责在对端建一条 offer，让文件立刻出现在接收方的列表里。
+func (a *App) offerTask(ctx context.Context, t *sendTask) error {
+	base := t.peer.BaseURL()
 	if base == "" {
 		return errors.New("这台设备没有可用地址")
 	}
-	sum, err := fileSHA256(src)
+	t.base = base
+	if t.isDir {
+		m, err := buildManifest(t.src)
+		if err != nil {
+			return err
+		}
+		resp, err := client.Offer(ctx, base, client.OfferReq{
+			FromID: a.self().ID, FromName: a.self().Name, ToID: t.peer.ID,
+			Kind: string(core.KindFolder), Name: m.Root, Size: m.TotalSize(),
+			Manifest: &m, TransferID: manifestID(m),
+		})
+		if err != nil {
+			return err
+		}
+		t.manifest = &m
+		t.size = m.TotalSize()
+		t.id = resp.ID
+		t.accepted = resp.Accepted
+		t.doneFiles = map[string]bool{}
+		for _, rel := range resp.DoneFiles {
+			t.doneFiles[rel] = true
+		}
+		return nil
+	}
+	sum, err := fileSHA256(t.src)
 	if err != nil {
 		return err
 	}
 	resp, err := client.Offer(ctx, base, client.OfferReq{
-		FromID: a.self().ID, FromName: a.self().Name, ToID: peer.ID,
-		Kind: string(core.KindFile), Name: filepath.Base(src), Size: size, SHA256: sum,
+		FromID: a.self().ID, FromName: a.self().Name, ToID: t.peer.ID,
+		Kind: string(core.KindFile), Name: t.name, Size: t.size, SHA256: sum,
 	})
 	if err != nil {
 		return err
 	}
 	if resp.Duplicate {
+		t.done = true
 		if a.JSON {
-			a.emit(map[string]any{"ok": true, "file": filepath.Base(src), "peer": peer.Name,
+			a.emit(map[string]any{"ok": true, "file": t.name, "peer": t.peer.Name,
 				"duplicate": true, "path": resp.Path})
 		} else {
-			fmt.Fprintf(a.Out, "%s 已经有同一个文件了，没再传。\n", peer.Name)
+			a.outMu.Lock()
+			fmt.Fprintf(a.Out, "%s 已经有同一个文件了，没再传。\n", t.peer.Name)
+			a.outMu.Unlock()
 		}
 		return nil
 	}
-	if !resp.Accepted {
-		a.warnf("等待 %s 确认…", peer.Name)
-		if err := a.waitAccepted(ctx, base, resp.ID); err != nil {
+	t.id = resp.ID
+	t.accepted = resp.Accepted
+	return nil
+}
+
+// runTask 等对方确认，然后抢一个上传空位。排队期间持续查询，
+// 免得对端把还没轮到、但已经确认过的 offer 当成断掉的传输收掉。
+func (a *App) runTask(ctx context.Context, t *sendTask, slots chan struct{}) error {
+	if !t.accepted {
+		if a.JSON {
+			a.emit(map[string]any{"event": "wait", "file": t.name, "peer": t.peer.Name})
+		} else {
+			a.warnf("等待 %s 确认…", t.peer.Name)
+		}
+		if err := a.waitAccepted(ctx, t.base, t.id); err != nil {
 			return err
 		}
 	}
-	f, err := os.Open(src)
+	queued := false
+	for {
+		select {
+		case slots <- struct{}{}:
+		default:
+			if !queued {
+				queued = true
+				if a.JSON {
+					a.emit(map[string]any{"event": "queue", "file": t.name, "peer": t.peer.Name})
+				}
+			}
+			st, err := client.GetOffer(ctx, t.base, t.id)
+			if err != nil {
+				return err
+			}
+			if st.Status == string(core.StatusFailed) || st.Status == string(core.StatusExpired) {
+				return errors.New("对方拒绝了")
+			}
+			select {
+			case slots <- struct{}{}:
+			case <-time.After(2 * time.Second):
+			}
+			continue
+		}
+		break
+	}
+	defer func() { <-slots }()
+	if t.isDir {
+		return a.uploadFolder(ctx, t)
+	}
+	return a.uploadFileTask(ctx, t)
+}
+
+func (a *App) uploadFileTask(ctx context.Context, t *sendTask) error {
+	f, err := os.Open(t.src)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	bar := newProgress(a.Err, "发送 "+filepath.Base(src), size, a.showProgress())
-	defer bar.finish()
+	prog := a.newTaskProgress(t, t.size)
+	defer prog.finish()
 
-	err = a.uploadOne(ctx, size, a.Cfg.Threads, bar.update, func(ctx context.Context, off, n int64) error {
+	err = a.uploadOne(ctx, t.size, a.Cfg.Threads, prog.update, func(ctx context.Context, off, n int64) error {
 		return a.putWithRetry(func() error {
-			return client.PutRange(ctx, base, resp.ID, a.rate(io.NewSectionReader(f, off, n)), off, n, size)
+			return client.PutRange(ctx, t.base, t.id, a.rate(io.NewSectionReader(f, off, n)), off, n, t.size)
 		})
 	})
-	if err != nil {
+	return err
+}
+
+// taskProgress 在终端里画进度条，在 --json 模式下发进度事件给调用方。
+type taskProgress struct {
+	a       *App
+	t       *sendTask
+	total   int64
+	bar     *progress
+	lastAt  time.Time
+	lastPos int64
+}
+
+func (a *App) newTaskProgress(t *sendTask, total int64) *taskProgress {
+	p := &taskProgress{a: a, t: t, total: total}
+	if !a.JSON {
+		p.bar = newProgress(a.Err, "发送 "+t.name, total, a.showProgress())
+	}
+	return p
+}
+
+func (p *taskProgress) update(sent int64) {
+	if p.bar != nil {
+		p.bar.update(sent)
+		return
+	}
+	now := time.Now()
+	if !p.lastAt.IsZero() && now.Sub(p.lastAt) < 300*time.Millisecond {
+		return
+	}
+	dt := now.Sub(p.lastAt).Seconds()
+	speed := int64(0)
+	if dt > 0 {
+		speed = int64(float64(sent-p.lastPos) / dt)
+	}
+	p.lastAt, p.lastPos = now, sent
+	p.a.emit(map[string]any{
+		"event": "progress", "file": p.t.name, "peer": p.t.peer.Name,
+		"received": sent, "total": p.total, "speed": speed,
+	})
+}
+
+func (p *taskProgress) finish() {
+	if p.bar != nil {
+		p.bar.finish()
+	}
+}
+
+func (a *App) reportTask(ctx context.Context, base string, t *sendTask, sendErr error, single bool) {
+	if recErr := client.AddHistory(ctx, base, core.TransferRecord{
+		Ts: time.Now().Unix(), Direction: "send", PeerName: t.peer.Name,
+		Name: t.name, Kind: map[bool]string{true: "folder", false: "file"}[t.isDir],
+		Size: t.size, Status: map[bool]string{true: "done", false: "failed"}[sendErr == nil],
+	}); recErr != nil {
+		a.warnf("记录发送日志失败: %v", recErr)
+	}
+	if sendErr != nil {
+		code := classify(sendErr)
+		a.warnf("%s: %v", t.name, sendErr)
+		if a.JSON {
+			a.emit(map[string]any{"ok": false, "file": t.name, "peer": t.peer.Name,
+				"code": code, "msg": sendErr.Error()})
+		}
+		return
+	}
+	if a.JSON {
+		a.emit(map[string]any{"ok": true, "file": t.name, "peer": t.peer.Name,
+			"id": t.peer.ID, "size": t.size})
+		return
+	}
+	a.outMu.Lock()
+	defer a.outMu.Unlock()
+	if single {
+		fmt.Fprintf(a.Out, "已发送给 %s\n", t.peer.Name)
+	} else {
+		fmt.Fprintf(a.Out, "已发送 %s → %s\n", t.name, t.peer.Name)
+	}
+}
+
+func (a *App) sendOne(ctx context.Context, peer core.Peer, src string, size int64) error {
+	t := &sendTask{src: src, name: filepath.Base(src), size: size, peer: peer}
+	if err := a.offerTask(ctx, t); err != nil {
 		return err
 	}
-	return nil
+	if t.done {
+		return nil
+	}
+	return a.runTask(ctx, t, make(chan struct{}, 3))
 }
 
 func (a *App) pickPeer(peers []core.Peer) (core.Peer, error) {
@@ -1268,8 +1480,16 @@ func (a *App) cmdDoctor(args []string) int {
 		} else {
 			checks = append(checks, doctorCheck{Name: "加密", OK: true, Detail: "明文（未加密）", Warn: true})
 		}
+		// 服务端保存的是发现过的全部设备，只有最近 12 秒还在广播的才算在线。
 		peers, _ := client.Peers(ctx, base)
-		checks = append(checks, doctorCheck{Name: "在线设备", OK: true, Detail: fmt.Sprintf("%d 台", len(peers))})
+		now := time.Now().Unix()
+		online := 0
+		for _, p := range peers {
+			if now-p.LastSeen <= 12 {
+				online++
+			}
+		}
+		checks = append(checks, doctorCheck{Name: "在线设备", OK: true, Detail: fmt.Sprintf("%d 台", online)})
 	}
 
 	// ---- 自测：发一个文件给自己 ----
@@ -1642,38 +1862,23 @@ func (a *App) waitAccepted(ctx context.Context, base, id string) error {
 
 // sendFolder 先把目录结构作为 manifest 发过去，再逐个文件上传。
 func (a *App) sendFolder(ctx context.Context, peer core.Peer, root string) error {
-	m, err := buildManifest(root)
-	if err != nil {
+	t := &sendTask{src: root, name: filepath.Base(root), isDir: true, peer: peer}
+	if err := a.offerTask(ctx, t); err != nil {
 		return err
 	}
-	base := peer.BaseURL()
-	if base == "" {
-		return errors.New("这台设备没有可用地址")
-	}
+	return a.runTask(ctx, t, make(chan struct{}, 3))
+}
 
-	resp, err := client.Offer(ctx, base, client.OfferReq{
-		FromID: a.self().ID, FromName: a.self().Name, ToID: peer.ID,
-		Kind: string(core.KindFolder), Name: m.Root, Size: m.TotalSize(),
-		Manifest: &m, TransferID: manifestID(m),
-	})
-	if err != nil {
-		return err
+// uploadFolder 按 manifest 逐个上传目录里的文件。
+func (a *App) uploadFolder(ctx context.Context, t *sendTask) error {
+	m := t.manifest
+	if m == nil {
+		return errors.New("目录清单没有准备好")
 	}
+	prog := a.newTaskProgress(t, m.TotalSize())
+	defer prog.finish()
 
-	if !resp.Accepted {
-		a.warnf("等待 %s 确认…", peer.Name)
-		if err := a.waitAccepted(ctx, base, resp.ID); err != nil {
-			return err
-		}
-	}
-
-	bar := newProgress(a.Err, "发送 "+m.Root, m.TotalSize(), a.showProgress())
-	defer bar.finish()
-
-	skip := map[string]bool{}
-	for _, rel := range resp.DoneFiles {
-		skip[rel] = true
-	}
+	skip := t.doneFiles
 	if len(skip) > 0 {
 		a.warnf("续传：跳过 %d 个已经传完的文件", len(skip))
 	}
@@ -1685,20 +1890,20 @@ func (a *App) sendFolder(ctx context.Context, peer core.Peer, root string) error
 		}
 		if skip[e.Rel] {
 			sent += e.Size
-			bar.update(sent)
+			prog.update(sent)
 			continue
 		}
-		src := filepath.Join(root, filepath.FromSlash(e.Rel))
+		src := filepath.Join(t.src, filepath.FromSlash(e.Rel))
 		base0 := sent
-		if err := a.uploadFile(ctx, base, resp.ID, e.Rel, src, e.Size, func(n int64) {
-			bar.update(base0 + n)
+		if err := a.uploadFile(ctx, t.base, t.id, e.Rel, src, e.Size, func(n int64) {
+			prog.update(base0 + n)
 		}); err != nil {
 			return err
 		}
 		sent += e.Size
-		bar.update(sent)
+		prog.update(sent)
 	}
-	return client.FinishFolder(ctx, base, resp.ID)
+	return client.FinishFolder(ctx, t.base, t.id)
 }
 
 // uploadOne 传一个文件。threads>1 时把文件切成块并发上传。
@@ -2377,7 +2582,7 @@ func (a *App) cmdCache(args []string) int {
 	}
 	defer st.Close()
 
-	parts, freed, err := cache.CleanParts(a.Cfg.RecvDirPath(), *dryRun, nil)
+	parts, freed, err := cache.CleanParts(a.Cfg.RecvDirPath(), *dryRun, nil, nil)
 	if err != nil {
 		return a.fail("CACHE", core.ExitError, err.Error())
 	}

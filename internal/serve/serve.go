@@ -139,6 +139,14 @@ func RunWith(ctx context.Context, opts Options) error {
 		return fmt.Errorf("绑定 UDP %d 失败: %w", core.DiscoverPort, err)
 	}
 	defer disc.Close()
+	// 正常退出时广播下线，其他设备立即把本机标为离线；
+	// 配置变更触发的重启不广播，避免对端看到一次假下线。
+	sayBye := true
+	defer func() {
+		if sayBye {
+			disc.SayBye()
+		}
+	}()
 
 	var pub *pubtext.Broadcaster
 	if err := bindUDP(func() error {
@@ -179,6 +187,8 @@ func RunWith(ctx context.Context, opts Options) error {
 	if opts.RecvDir != "" {
 		recvDir = opts.RecvDir
 	}
+	// 上次留下的空暂存目录顺手收掉；里面还有分片就留着，等续传或清理。
+	_ = os.Remove(filepath.Join(recvDir, ".parts"))
 	restartCh := make(chan struct{}, 1)
 
 	srv := &httpapi.Server{
@@ -234,7 +244,7 @@ func RunWith(ctx context.Context, opts Options) error {
 
 	// 定期清理对方断线后挂着的传输。
 	go func() {
-		t := time.NewTicker(30 * time.Second)
+		t := time.NewTicker(2 * time.Second)
 		defer t.Stop()
 		for {
 			select {
@@ -249,7 +259,7 @@ func RunWith(ctx context.Context, opts Options) error {
 	}()
 
 	disc.Announce()
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -258,6 +268,7 @@ func RunWith(ctx context.Context, opts Options) error {
 			shutdown(hs)
 			return nil
 		case <-restartCh:
+			sayBye = false
 			logf("配置有变更，正在重启服务…\n")
 			// 先放掉所有监听端口，避免新实例绑不上。
 			shutdown(hs)

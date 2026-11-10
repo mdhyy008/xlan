@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	_ "modernc.org/sqlite"
 
@@ -27,6 +28,7 @@ CREATE TABLE IF NOT EXISTS items (
   path       TEXT,
   manifest   TEXT,
   ranges     TEXT,
+  duplicate  INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_items_created ON items(created_at DESC);
@@ -53,6 +55,11 @@ CREATE TABLE IF NOT EXISTS peers (
   last_seen INTEGER NOT NULL,
   trusted   INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS meta (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `
 
 // Store 封装 SQLite。
@@ -77,12 +84,13 @@ func Open(path string) (*Store, error) {
 	// 旧库补列，失败说明列已存在。
 	_, _ = db.Exec(`ALTER TABLE items ADD COLUMN manifest TEXT`)
 	_, _ = db.Exec(`ALTER TABLE items ADD COLUMN ranges TEXT`)
+	_, _ = db.Exec(`ALTER TABLE items ADD COLUMN duplicate INTEGER NOT NULL DEFAULT 0`)
 	return &Store{db: db}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
 
-const itemCols = `id, kind, from_id, from_name, to_id, channel, body, name, size, sha256, status, path, created_at`
+const itemCols = `id, kind, from_id, from_name, to_id, channel, body, name, size, sha256, status, path, created_at, duplicate`
 
 func scanItem(row interface{ Scan(...any) error }) (core.Item, error) {
 	var it core.Item
@@ -90,11 +98,13 @@ func scanItem(row interface{ Scan(...any) error }) (core.Item, error) {
 	// 这些列历史上可能是 NULL，一律用 NullString 兜住，否则一行脏数据会让整个列表读不出来。
 	var fromID, fromName, toID, body, name, sha, path sql.NullString
 	var size sql.NullInt64
+	var duplicate int
 	err := row.Scan(&it.ID, &kind, &fromID, &fromName, &toID, &channel,
-		&body, &name, &size, &sha, &status, &path, &it.CreatedAt)
+		&body, &name, &size, &sha, &status, &path, &it.CreatedAt, &duplicate)
 	if err != nil {
 		return core.Item{}, err
 	}
+	it.Duplicate = duplicate != 0
 	it.FromID = fromID.String
 	it.FromName = fromName.String
 	it.ToID = toID.String
@@ -111,12 +121,12 @@ func scanItem(row interface{ Scan(...any) error }) (core.Item, error) {
 
 func (s *Store) AddItem(it core.Item) error {
 	_, err := s.db.Exec(`INSERT INTO items(`+itemCols+`)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 		  status=excluded.status, path=excluded.path, sha256=excluded.sha256,
-		  size=excluded.size, body=excluded.body`,
+		  size=excluded.size, body=excluded.body, duplicate=excluded.duplicate`,
 		it.ID, string(it.Kind), it.FromID, it.FromName, it.ToID, string(it.Channel),
-		it.Body, it.Name, it.Size, it.SHA256, string(it.Status), it.Path, it.CreatedAt)
+		it.Body, it.Name, it.Size, it.SHA256, string(it.Status), it.Path, it.CreatedAt, it.Duplicate)
 	return err
 }
 
@@ -132,20 +142,110 @@ func (s *Store) GetItem(id string) (core.Item, bool, error) {
 	return it, true, nil
 }
 
-// ListItems 按时间倒序返回，limit<=0 表示不限。
-func (s *Store) ListItems(limit int, since int64) ([]core.Item, error) {
+// ListItems 按时间倒序返回，limit<=0 表示不限。offset 用于分页，
+// 排序带上 id，避免同一秒内的记录在不同页之间错位。
+func (s *Store) ListItems(limit int, since int64, offset int) ([]core.Item, error) {
 	q := `SELECT ` + itemCols + ` FROM items`
 	args := []any{}
 	if since > 0 {
 		q += ` WHERE created_at >= ?`
 		args = append(args, since)
 	}
-	q += ` ORDER BY created_at DESC`
+	q += ` ORDER BY created_at DESC, id DESC`
+	if limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+		if offset > 0 {
+			q += ` OFFSET ?`
+			args = append(args, offset)
+		}
+	}
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []core.Item{}
+	for rows.Next() {
+		it, err := scanItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// ListPublic 按时间倒序返回公共频道的文本消息，用于和其他设备对齐历史。
+func (s *Store) ListPublic(limit int) ([]core.Item, error) {
+	q := `SELECT ` + itemCols + ` FROM items WHERE channel = ? AND kind = ? ORDER BY created_at DESC`
+	args := []any{string(core.ChanPublic), string(core.KindText)}
 	if limit > 0 {
 		q += ` LIMIT ?`
 		args = append(args, limit)
 	}
 	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []core.Item{}
+	for rows.Next() {
+		it, err := scanItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+// CountPublic 返回本机保存的公共频道文本消息条数，用于挑记录最全的设备。
+func (s *Store) CountPublic() (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM items WHERE channel = ? AND kind = ?`,
+		string(core.ChanPublic), string(core.KindText)).Scan(&n)
+	return n, err
+}
+
+// ClearPublic 删除 cutoff 及以前的公共频道文本消息。
+func (s *Store) ClearPublic(cutoff int64) (int, error) {
+	res, err := s.db.Exec(`DELETE FROM items WHERE channel = ? AND kind = ? AND created_at <= ?`,
+		string(core.ChanPublic), string(core.KindText), cutoff)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
+// MetaInt 读取整数型元数据，键不存在时返回 0。
+func (s *Store) MetaInt(key string) (int64, error) {
+	var v string
+	err := s.db.QueryRow(`SELECT value FROM meta WHERE key = ?`, key).Scan(&v)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return 0, nil
+	}
+	return n, nil
+}
+
+// SetMetaInt 写入整数型元数据。
+func (s *Store) SetMetaInt(key string, v int64) error {
+	_, err := s.db.Exec(`INSERT INTO meta(key, value) VALUES(?, ?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, strconv.FormatInt(v, 10))
+	return err
+}
+
+// ListPending 返回所有还没被处理的 offer（用于清理过期的待接收条目）。
+func (s *Store) ListPending() ([]core.Item, error) {
+	rows, err := s.db.Query(`SELECT `+itemCols+` FROM items WHERE status = ?`, string(core.StatusPending))
 	if err != nil {
 		return nil, err
 	}
@@ -300,6 +400,12 @@ func (s *Store) UpsertPeer(p core.Peer) error {
 		  name=excluded.name, addr=excluded.addr, port=excluded.port,
 		  platform=excluded.platform, last_seen=excluded.last_seen`,
 		p.ID, p.Name, p.Addr, p.Port, p.Platform, p.LastSeen)
+	return err
+}
+
+// MarkPeerOffline 把设备的最近发现时间清零，客户端据此立即判为离线。
+func (s *Store) MarkPeerOffline(id string) error {
+	_, err := s.db.Exec(`UPDATE peers SET last_seen=0 WHERE id=?`, id)
 	return err
 }
 

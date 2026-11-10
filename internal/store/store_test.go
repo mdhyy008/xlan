@@ -27,7 +27,7 @@ func TestItemCRUD(t *testing.T) {
 		t.Fatalf("mismatch: %+v", got)
 	}
 
-	items, err := s.ListItems(10, 0)
+	items, err := s.ListItems(10, 0, 0)
 	if err != nil || len(items) != 1 {
 		t.Fatalf("list: %d %v", len(items), err)
 	}
@@ -48,7 +48,7 @@ func TestListItemsSince(t *testing.T) {
 		_ = s.AddItem(core.Item{ID: string(rune('a' + i)), Kind: core.KindText,
 			FromID: "p", ToID: "*", Channel: core.ChanPublic, Status: core.StatusDone, CreatedAt: ts})
 	}
-	items, _ := s.ListItems(0, 20)
+	items, _ := s.ListItems(0, 20, 0)
 	if len(items) != 2 {
 		t.Fatalf("expected 2 items since 20, got %d", len(items))
 	}

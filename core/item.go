@@ -33,19 +33,21 @@ const PublicTo = "*"
 
 // Item 是收件箱里的一条记录，文本与文件共用。
 type Item struct {
-	ID        string  `json:"id"`
-	Kind      Kind    `json:"kind"`
-	FromID    string  `json:"from_id"`
-	FromName  string  `json:"from_name,omitempty"`
-	ToID      string  `json:"to_id"`
-	Channel   Channel `json:"channel"`
-	Body      string  `json:"body,omitempty"`
-	Name      string  `json:"name,omitempty"`
-	Size      int64   `json:"size,omitempty"`
-	SHA256    string  `json:"sha256,omitempty"`
-	Status    Status  `json:"status"`
-	Path      string  `json:"path,omitempty"`
-	CreatedAt int64   `json:"created_at"`
+	ID       string  `json:"id"`
+	Kind     Kind    `json:"kind"`
+	FromID   string  `json:"from_id"`
+	FromName string  `json:"from_name,omitempty"`
+	ToID     string  `json:"to_id"`
+	Channel  Channel `json:"channel"`
+	Body     string  `json:"body,omitempty"`
+	Name     string  `json:"name,omitempty"`
+	Size     int64   `json:"size,omitempty"`
+	SHA256   string  `json:"sha256,omitempty"`
+	Status   Status  `json:"status"`
+	Path     string  `json:"path,omitempty"`
+	// Duplicate 表示接收目录里已经有同名同内容的文件，这次没有真正传输。
+	Duplicate bool  `json:"duplicate,omitempty"`
+	CreatedAt int64 `json:"created_at"`
 }
 
 func (i Item) IsText() bool { return i.Kind == KindText }

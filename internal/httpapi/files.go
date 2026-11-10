@@ -57,7 +57,7 @@ func (s *Server) handleOffer(w http.ResponseWriter, r *http.Request) {
 					ID: id, Kind: kind, FromID: req.FromID, FromName: req.FromName,
 					ToID: s.Dev.ID, Channel: core.ChanDM, Name: req.Name,
 					Size: req.Size, SHA256: req.SHA256, Status: core.StatusDone,
-					Path: dest, CreatedAt: time.Now().Unix(),
+					Path: dest, Duplicate: true, CreatedAt: time.Now().Unix(),
 				}
 				if err := s.Store.AddItem(it); err != nil {
 					writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
@@ -152,6 +152,11 @@ func (s *Server) handleGetOffer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "NOT_FOUND", "no such offer")
 		return
 	}
+	// 发送方排队等并发空位时会一直查询这条 offer，这就算"还没断"，
+	// 否则已经确认、但还没轮到上传的文件会在 5 秒后被当成死传输收掉。
+	if it.Status == core.StatusPending || it.Status == core.StatusActive {
+		s.touch(id)
+	}
 	var offset int64
 	if st, err := os.Stat(s.partPath(id)); err == nil {
 		offset = st.Size()
@@ -170,6 +175,7 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var req struct {
 		Action string `json:"action"`
+		By     string `json:"by"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
@@ -193,15 +199,21 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 		s.clearProgress(id)
 		s.clearRanges(id)
 		s.clear(id)
+		s.cleanPartial(it)
 		s.maybeRestart()
 		if err := s.Store.UpdateItemStatus(id, core.StatusFailed, it.Path); err != nil {
 			writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
 			return
 		}
-		s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(),
-			Data: map[string]any{"id": id, "status": string(core.StatusFailed),
-				"kind": string(it.Kind), "from_id": it.FromID,
-				"name": it.Name, "size": it.Size}})
+		data := map[string]any{"id": id, "status": string(core.StatusFailed),
+			"kind": string(it.Kind), "from_id": it.FromID,
+			"name": it.Name, "size": it.Size}
+		// 发送方撤回时说清楚是谁取消的，接收方要显示「对方已取消」，
+		// 不能和自己点取消混在一起。
+		if req.By == "sender" {
+			data["reason"] = "peer_canceled"
+		}
+		s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: time.Now().Unix(), Data: data})
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "failed"})
 		return
 	}
@@ -237,6 +249,7 @@ func (s *Server) handleDecision(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": "active"})
 	case "reject":
 		s.clear(id)
+		s.cleanPartial(it)
 		defer s.maybeRestart()
 		if err := s.Store.UpdateItemStatus(id, core.StatusFailed, it.Path); err != nil {
 			writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
@@ -293,7 +306,9 @@ func (s *Server) handlePutData(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 按偏移直接写，这样多线程可以乱序传同一个文件。
-	n, copyErr := io.Copy(&offsetWriter{f: f, off: start}, r.Body)
+	// 大文件单次请求可能传很久，边写边 touch，别被当成卡死收口掉。
+	ow := &offsetWriter{f: f, off: start, touch: func() { s.touch(id) }}
+	n, copyErr := io.Copy(ow, r.Body)
 	// Windows 不允许重命名仍被打开的文件，写完立刻关，别等 handler 返回。
 	closeErr := f.Close()
 	if copyErr != nil {
@@ -328,16 +343,46 @@ func (s *Server) handlePutData(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "offset": covered, "done": true})
 }
 
+// touchEvery 是上传过程中刷新活动时间的最小字节间隔。
+const touchEvery = 256 << 10
+
 // offsetWriter 用 WriteAt 写文件，支持多个请求并发写不同偏移。
 type offsetWriter struct {
-	f   *os.File
-	off int64
+	f      *os.File
+	off    int64
+	touch  func()
+	unsent int64
 }
 
 func (w *offsetWriter) Write(p []byte) (int, error) {
 	n, err := w.f.WriteAt(p, w.off)
 	w.off += int64(n)
+	touchAfterWrite(n, &w.unsent, w.touch)
 	return n, err
+}
+
+// touchWriter 顺序写文件，同时按字节间隔刷新活动时间。
+type touchWriter struct {
+	w      io.Writer
+	touch  func()
+	unsent int64
+}
+
+func (w *touchWriter) Write(p []byte) (int, error) {
+	n, err := w.w.Write(p)
+	touchAfterWrite(n, &w.unsent, w.touch)
+	return n, err
+}
+
+func touchAfterWrite(n int, unsent *int64, touch func()) {
+	if touch == nil || n <= 0 {
+		return
+	}
+	*unsent += int64(n)
+	if *unsent >= touchEvery {
+		*unsent = 0
+		touch()
+	}
 }
 
 var ErrChecksum = errors.New("checksum mismatch")
@@ -364,6 +409,7 @@ func (s *Server) finalize(it core.Item, part string) error {
 		}
 		if !strings.EqualFold(got, it.SHA256) {
 			os.Remove(part)
+			_ = os.Remove(filepath.Dir(part))
 			s.clearProgress(it.ID)
 			return fmt.Errorf("%w: want %s, got %s", ErrChecksum, it.SHA256, got)
 		}
@@ -376,6 +422,8 @@ func (s *Server) finalize(it core.Item, part string) error {
 	if err := renameWithRetry(part, final); err != nil {
 		return err
 	}
+	// 传完收掉空的暂存目录，别在收件目录里留 .parts 空壳。
+	_ = os.Remove(filepath.Dir(part))
 	if err := s.Store.UpdateItemStatus(it.ID, core.StatusDone, final); err != nil {
 		return err
 	}

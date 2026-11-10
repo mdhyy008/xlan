@@ -106,9 +106,42 @@ func (d *Discoverer) HandlePacket(p core.Packet, from *net.UDPAddr) {
 		if err := d.Store.UpsertPeer(peer); err != nil {
 			return
 		}
+		// UpsertPeer 不覆盖已有的 trusted；事件里必须带上它，否则每次心跳都会把客户端的自动接收开关冲掉。
+		if saved, ok, err := d.Store.GetPeer(peer.ID); err == nil && ok {
+			peer.Trusted = saved.Trusted
+		}
 		if d.Bus != nil {
 			d.Bus.Publish(core.Event{Type: core.EvPeerOnline, Ts: time.Now().Unix(), Data: peer})
 		}
+	case "bye":
+		if err := d.Store.MarkPeerOffline(p.ID); err != nil {
+			return
+		}
+		if d.Bus != nil {
+			d.Bus.Publish(core.Event{
+				Type: core.EvPeerOffline,
+				Ts:   time.Now().Unix(),
+				Data: core.Peer{ID: p.ID, Name: p.Name},
+			})
+		}
+	}
+}
+
+// SayBye 广播本机下线，让同网段设备立即把本机标为离线。
+func (d *Discoverer) SayBye() {
+	d.mu.RLock()
+	send := d.send
+	d.mu.RUnlock()
+	if send == nil {
+		return
+	}
+	p := core.Packet{V: 1, T: "bye", ID: d.Dev.ID, Name: d.Dev.Name}
+	b, err := p.Marshal()
+	if err != nil {
+		return
+	}
+	for _, a := range d.targets() {
+		_ = send(a, b)
 	}
 }
 

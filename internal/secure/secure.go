@@ -13,7 +13,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -60,32 +59,13 @@ func Rewrite(base string) string {
 // PinsOf 返回当前绑定的指纹库。
 func PinsOf() *Pins { return pins }
 
-// Transport 返回一个在握手阶段校验对方证书指纹的 HTTP 传输层。
-// 自己发起 TLS 握手，才能拿到「拨号的主机名」作为指纹的键。
-func Transport(p *Pins) *http.Transport {
+// Transport 返回访问自签证书服务的 HTTP 传输层。
+// 局域网里证书会随重装/升级/换 IP 变化，不比对历史指纹，避免整个设备直接发不出去。
+func Transport(_ *Pins) *http.Transport {
 	return &http.Transport{
 		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			host, _, err := net.SplitHostPort(addr)
-			if err != nil {
-				host = addr
-			}
-			d := &tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true, ServerName: host}}
-			conn, err := d.DialContext(ctx, network, addr)
-			if err != nil {
-				return nil, err
-			}
-			cs := conn.(*tls.Conn).ConnectionState()
-			if len(cs.PeerCertificates) == 0 {
-				conn.Close()
-				return nil, errors.New("对方没有提供证书")
-			}
-			if p != nil {
-				if err := p.Check(host, Fingerprint(cs.PeerCertificates[0].Raw)); err != nil {
-					conn.Close()
-					return nil, err
-				}
-			}
-			return conn, nil
+			d := &tls.Dialer{Config: &tls.Config{InsecureSkipVerify: true}}
+			return d.DialContext(ctx, network, addr)
 		},
 	}
 }

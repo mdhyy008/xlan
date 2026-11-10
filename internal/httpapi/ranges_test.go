@@ -101,7 +101,7 @@ func TestReapStaleFailsIdleTransfers(t *testing.T) {
 	// 刚开始的传输
 	fresh := core.Item{ID: "fresh", Kind: core.KindFile, FromID: "p", ToID: "self",
 		Channel: core.ChanDM, Name: "b", Size: 100, Status: core.StatusActive,
-		CreatedAt: now - 10}
+		CreatedAt: now - 2}
 	_ = s.Store.AddItem(old)
 	_ = s.Store.AddItem(fresh)
 

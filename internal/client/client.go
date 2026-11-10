@@ -108,7 +108,16 @@ func GetOffer(ctx context.Context, base, id string) (OfferState, error) {
 }
 
 func Decision(ctx context.Context, base, id, action string) error {
+	return DecisionBy(ctx, base, id, action, "")
+}
+
+// DecisionBy 额外带上操作方，用来区分是接收方自己取消，
+// 还是发送方撤回了这批发不成的文件。
+func DecisionBy(ctx context.Context, base, id, action, by string) error {
 	body := map[string]string{"action": action}
+	if by != "" {
+		body["by"] = by
+	}
 	return postJSON(ctx, urlOf(base)+"/v1/offer/"+id+"/decision", body, nil)
 }
 
@@ -157,6 +166,27 @@ func Inbox(ctx context.Context, base string, limit int, since int64) ([]core.Ite
 	}
 	err := getJSON(ctx, url, &out)
 	return out.Items, err
+}
+
+// PublicHistory 拉取对端保存的公共频道文本消息。
+func PublicHistory(ctx context.Context, base string, limit int) ([]core.Item, error) {
+	url := fmt.Sprintf("%s/v1/public/history?limit=%d", urlOf(base), limit)
+	var out struct {
+		OK    bool        `json:"ok"`
+		Items []core.Item `json:"items"`
+	}
+	err := getJSON(ctx, url, &out)
+	return out.Items, err
+}
+
+// PublicTotal 取对端保存的公共频道条数，用于挑选记录最全的设备。
+func PublicTotal(ctx context.Context, base string) (int, error) {
+	var out struct {
+		OK    bool `json:"ok"`
+		Total int  `json:"total"`
+	}
+	err := getJSON(ctx, urlOf(base)+"/v1/public/stats", &out)
+	return out.Total, err
 }
 
 func Peers(ctx context.Context, base string) ([]core.Peer, error) {

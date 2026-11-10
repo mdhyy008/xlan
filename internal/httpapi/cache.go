@@ -24,13 +24,26 @@ func (s *Server) handleCacheClean(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	parts, freed, err := cache.CleanParts(s.RecvDir(), req.DryRun, func(id string) {
+	parts, freed, err := cache.CleanParts(s.RecvDir(), req.DryRun, s.partActive, func(id string) {
 		s.clearRanges(id)
 	})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "FS", err.Error())
 		return
 	}
+	// 文件夹传输的半成品散落在收件目录里，按进行中任务的根目录保留，其余全清掉。
+	active, err := s.Store.ListActive()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
+		return
+	}
+	stray, strayFreed, err := cache.CleanStrayParts(s.RecvDir(), req.DryRun, active)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "FS", err.Error())
+		return
+	}
+	parts += stray
+	freed += strayFreed
 	records, err := cache.CleanRecords(s.Store, time.Now().Unix()-req.OlderThanSec, req.DryRun, func(it core.Item) {
 		s.clearProgress(it.ID)
 		s.clearRanges(it.ID)

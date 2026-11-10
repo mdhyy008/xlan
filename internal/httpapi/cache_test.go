@@ -32,6 +32,14 @@ func TestCacheClean(t *testing.T) {
 	if err := os.Chtimes(oldPart, old, old); err != nil {
 		t.Fatal(err)
 	}
+	// live.part 属于一条正在进行、刚刚还有数据的传输，清理时要跳过。
+	if err := s.Store.AddItem(core.Item{
+		ID: "live", Kind: core.KindFile, FromID: "p", ToID: "self",
+		Channel: core.ChanDM, Name: "e", Status: core.StatusActive, CreatedAt: now.Unix(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s.touch("live")
 
 	items := []core.Item{
 		{ID: "old-done", Kind: core.KindFile, FromID: "p", ToID: "self", Channel: core.ChanDM, Name: "a", Status: core.StatusDone, CreatedAt: old.Unix()},

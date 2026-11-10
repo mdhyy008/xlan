@@ -8,7 +8,7 @@ import (
 var ErrPacketTooLarge = errors.New("packet exceeds 1200 bytes")
 
 // Packet 是发现与公共文本共用的线上包，用 T 区分类型：
-// probe / announce / msg / ack。
+// probe / announce / bye / msg / ack。bye 表示设备正常退出，收到后立即标为离线。
 type Packet struct {
 	V        int    `json:"v"`
 	T        string `json:"t"`

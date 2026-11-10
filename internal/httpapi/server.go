@@ -44,6 +44,8 @@ type Server struct {
 	RequestRestart func()
 
 	pendingRestart int32
+	// pubSyncing 保证同一时刻只有一次公共频道历史同步在跑。
+	pubSyncing int32
 
 	activityMu sync.Mutex
 	// activity 记录每个进行中的传输最后一次动的时间，用于判断能否重启。
@@ -193,18 +195,24 @@ func (s *Server) clearRanges(id string) {
 }
 
 // staleAfter 是判定"传输已经死了"的静默时长。
-const staleAfter = 5 * time.Minute
+// 发送方中途退出、取消或被杀死时，接收方最多等这么久就收口为失败，
+// 进度条不会一直卡着。上传过程中每写一段都会 touch，慢速传输不受影响。
+const staleAfter = 5 * time.Second
 
-// ReapStale 把长时间没有数据的 active 传输标记为失败，
-// 避免对方断线后条目一直挂着。
+// pendingTTL 是待接收 offer 的最长保留时间。发送方发起后退出的话，
+// 没人再来传数据，过期后直接收口，避免列表里永远挂着一条待接收。
+const pendingTTL = 10 * time.Minute
+
+// ReapStale 把长时间没有数据的 active 传输、以及长时间没人处理的 pending
+// offer 标记为失败，避免对方断线或退出后条目一直挂着。
 func (s *Server) ReapStale() int {
-	items, err := s.Store.ListActive()
+	active, err := s.Store.ListActive()
 	if err != nil {
 		return 0
 	}
 	now := time.Now().Unix()
 	n := 0
-	for _, it := range items {
+	for _, it := range active {
 		last := it.CreatedAt
 		s.activityMu.Lock()
 		if ts, ok := s.activity[it.ID]; ok {
@@ -215,22 +223,51 @@ func (s *Server) ReapStale() int {
 		if now-last < int64(staleAfter.Seconds()) {
 			continue
 		}
-		s.clearProgress(it.ID)
-		s.clearRanges(it.ID)
-		s.clear(it.ID)
-		if err := s.Store.UpdateItemStatus(it.ID, core.StatusFailed, it.Path); err != nil {
-			continue
-		}
-		s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: now,
-			Data: map[string]any{"id": it.ID, "status": string(core.StatusFailed),
-				"kind": string(it.Kind), "from_id": it.FromID,
-				"reason": "stale", "name": it.Name, "size": it.Size}})
+		s.failItem(it, "stale", now)
 		n++
 	}
+
+	pending, err := s.Store.ListPending()
+	if err != nil {
+		return n
+	}
+	for _, it := range pending {
+		s.activityMu.Lock()
+		ts, seen := s.activity[it.ID]
+		s.activityMu.Unlock()
+		// 发送方建好 offer 后一直轮询确认状态；轮询一停就说明对方已经
+		// 退出或取消，立刻收口，免得接收方还要干等 10 分钟。
+		if seen && now-ts/int64(time.Second) >= int64(staleAfter.Seconds()) {
+			s.failItem(it, "peer_canceled", now)
+			n++
+			continue
+		}
+		if now-it.CreatedAt < int64(pendingTTL.Seconds()) {
+			continue
+		}
+		s.failItem(it, "expired", now)
+		n++
+	}
+
 	if n > 0 {
 		s.maybeRestart()
 	}
 	return n
+}
+
+// failItem 把一条未完成的传输收口为失败并通知客户端。
+func (s *Server) failItem(it core.Item, reason string, now int64) {
+	s.clearProgress(it.ID)
+	s.clearRanges(it.ID)
+	s.clear(it.ID)
+	s.cleanPartial(it)
+	if err := s.Store.UpdateItemStatus(it.ID, core.StatusFailed, it.Path); err != nil {
+		return
+	}
+	s.Bus.Publish(core.Event{Type: core.EvItemUpdate, Ts: now,
+		Data: map[string]any{"id": it.ID, "status": string(core.StatusFailed),
+			"kind": string(it.Kind), "from_id": it.FromID,
+			"reason": reason, "name": it.Name, "size": it.Size}})
 }
 
 // clearProgress 在传输结束时清掉状态。
@@ -253,6 +290,22 @@ func (s *Server) touch(id string) {
 	}
 	s.activity[id] = time.Now().UnixNano()
 	s.activityMu.Unlock()
+}
+
+// partActive 判断某个分片是否还有人在写：传输已结束、记录已不存在，
+// 或者最近 30 秒内没有新字节的，都算可以删。
+func (s *Server) partActive(id string) bool {
+	it, ok, err := s.Store.GetItem(id)
+	if err != nil || !ok || it.Status != core.StatusActive {
+		return false
+	}
+	s.activityMu.Lock()
+	ts, seen := s.activity[id]
+	s.activityMu.Unlock()
+	if !seen {
+		return false
+	}
+	return time.Since(time.Unix(0, ts)) < 30*time.Second
 }
 
 func (s *Server) clear(id string) {
@@ -295,6 +348,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/events", s.handleEvents)
 	mux.HandleFunc("POST /v1/text", localOnly(s.handleText))
 	mux.HandleFunc("GET /v1/inbox", localOnly(s.handleInbox))
+	mux.HandleFunc("GET /v1/public/history", s.handlePublicHistory)
+	mux.HandleFunc("GET /v1/public/stats", s.handlePublicStats)
+	mux.HandleFunc("POST /v1/public/sync", localOnly(s.handlePublicSync))
+	mux.HandleFunc("POST /v1/public/clear", localOnly(s.handlePublicClear))
 	mux.HandleFunc("GET /v1/item/{id}", localOnly(s.handleGetItem))
 	mux.HandleFunc("POST /v1/inbox/clean", localOnly(s.handleClean))
 	mux.HandleFunc("POST /v1/cache/clean", localOnly(s.handleCacheClean))
@@ -633,12 +690,166 @@ func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request) {
 			since = n
 		}
 	}
-	items, err := s.Store.ListItems(limit, since)
+	offset := 0
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			offset = n
+		}
+	}
+	items, err := s.Store.ListItems(limit, since, offset)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "items": items})
+}
+
+// publicHistoryMax 是单次补齐公共频道历史的上限。
+const publicHistoryMax = 5000
+
+// handlePublicHistory 把本机保存的公共频道文本消息给对端，用于补齐历史。
+func (s *Server) handlePublicHistory(w http.ResponseWriter, r *http.Request) {
+	limit := 300
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= publicHistoryMax {
+			limit = n
+		}
+	}
+	items, err := s.Store.ListPublic(limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "items": items})
+}
+
+// handlePublicStats 只报本机保存的公共频道条数，供对端挑记录最全的设备。
+func (s *Server) handlePublicStats(w http.ResponseWriter, r *http.Request) {
+	n, err := s.Store.CountPublic()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "total": n})
+}
+
+// metaPublicClearedAt 记录用户最后一次清空公共频道的时间点。
+const metaPublicClearedAt = "public_cleared_at"
+
+// handlePublicClear 清掉本机保存的公共频道历史并记下时间点，
+// 之后向其他设备补齐历史时只收这个时间点之后的消息。
+func (s *Server) handlePublicClear(w http.ResponseWriter, r *http.Request) {
+	now := time.Now().Unix()
+	if _, err := s.Store.ClearPublic(now); err != nil {
+		writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
+		return
+	}
+	if err := s.Store.SetMetaInt(metaPublicClearedAt, now); err != nil {
+		writeErr(w, http.StatusInternalServerError, "STORE", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handlePublicSync 主动向记录最全的在线设备补齐公共频道历史。
+func (s *Server) handlePublicSync(w http.ResponseWriter, r *http.Request) {
+	go s.SyncPublicHistory()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// publicSyncWindow 只和最近还在线的设备同步，避免挨个等离线设备超时。
+const publicSyncWindow = 5 * time.Minute
+
+// SyncPublicHistory 从记录最全的那台在线设备补齐公共频道历史。
+// 先并发问各设备有多少条（只是一次 COUNT），只向最多的那台拉一次，
+// 按消息 ID 去重合并；本机已经最全时直接跳过，不做多余传输。
+func (s *Server) SyncPublicHistory() int {
+	if !atomic.CompareAndSwapInt32(&s.pubSyncing, 0, 1) {
+		return 0
+	}
+	defer atomic.StoreInt32(&s.pubSyncing, 0)
+
+	peers, err := s.Store.ListPeers()
+	if err != nil {
+		return 0
+	}
+	now := time.Now().Unix()
+	bases := make([]string, 0, len(peers))
+	for _, p := range peers {
+		if now-p.LastSeen > int64(publicSyncWindow.Seconds()) {
+			continue
+		}
+		if base := p.BaseURL(); base != "" {
+			bases = append(bases, base)
+		}
+	}
+	if len(bases) == 0 {
+		return 0
+	}
+
+	local, err := s.Store.CountPublic()
+	if err != nil {
+		return 0
+	}
+
+	type stat struct {
+		base  string
+		total int
+	}
+	stats := make(chan stat, len(bases))
+	for _, base := range bases {
+		go func(base string) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			n, err := client.PublicTotal(ctx, base)
+			cancel()
+			if err != nil {
+				stats <- stat{}
+				return
+			}
+			stats <- stat{base: base, total: n}
+		}(base)
+	}
+	best, bestTotal := "", local
+	for range bases {
+		st := <-stats
+		if st.total > bestTotal {
+			best, bestTotal = st.base, st.total
+		}
+	}
+	if best == "" {
+		return 0
+	}
+
+	limit := bestTotal
+	if limit > publicHistoryMax {
+		limit = publicHistoryMax
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	items, err := client.PublicHistory(ctx, best, limit)
+	cancel()
+	if err != nil {
+		return 0
+	}
+	// 用户清空过公共频道的话，清空时间点之前的旧消息不再补回来。
+	clearedAt, _ := s.Store.MetaInt(metaPublicClearedAt)
+	added := 0
+	for _, it := range items {
+		if it.Channel != core.ChanPublic || it.Kind != core.KindText {
+			continue
+		}
+		if it.CreatedAt <= clearedAt {
+			continue
+		}
+		if _, ok, err := s.Store.GetItem(it.ID); err != nil || ok {
+			continue
+		}
+		if err := s.Store.AddItem(it); err != nil {
+			continue
+		}
+		s.Bus.Publish(core.Event{Type: core.EvItemNew, Ts: it.CreatedAt, Data: it})
+		added++
+	}
+	return added
 }
 
 func (s *Server) handleText(w http.ResponseWriter, r *http.Request) {

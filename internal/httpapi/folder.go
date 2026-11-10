@@ -160,7 +160,7 @@ func (s *Server) handlePutFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "FS", err.Error())
 		return
 	}
-	n, err := io.Copy(f, r.Body)
+	n, err := io.Copy(&touchWriter{w: f, touch: func() { s.touch(id) }}, r.Body)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "WRITE", err.Error())
 		return

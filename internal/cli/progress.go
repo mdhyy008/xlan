@@ -59,10 +59,19 @@ func (p *progress) update(done int64) {
 	p.draw()
 }
 
+// progressMu 让同时上传的几条进度条不会把彼此的行写串。
+var progressMu sync.Mutex
+
 func (p *progress) draw() {
 	if !p.enabled {
 		return
 	}
+	progressMu.Lock()
+	defer progressMu.Unlock()
+	p.drawLocked()
+}
+
+func (p *progress) drawLocked() {
 	pct := 0.0
 	if p.total > 0 {
 		pct = float64(p.done) * 100 / float64(p.total)
@@ -78,10 +87,12 @@ func (p *progress) finish() {
 	if !p.enabled {
 		return
 	}
+	progressMu.Lock()
+	defer progressMu.Unlock()
 	if p.total > 0 {
 		p.done = p.total
 	}
-	p.draw()
+	p.drawLocked()
 	fmt.Fprintln(p.out)
 }
 
